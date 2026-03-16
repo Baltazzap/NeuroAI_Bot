@@ -1,7 +1,7 @@
 import os
 import discord
 from discord.ext import commands
-from discord.ui import Button, View, Select
+from discord.ui import Button, View, Select, button
 from dotenv import load_dotenv
 from datetime import datetime
 
@@ -87,6 +87,38 @@ async def send_log(bot, title, description, color, fields=None, thumbnail=None):
     except Exception as e:
         print(f"⚠️ Ошибка отправки лога: {e}")
 
+# --- КНОПКА ПОДТВЕРЖДЕНИЯ ЗАКРЫТИЯ ---
+class ConfirmCloseView(View):
+    def __init__(self, original_interaction: discord.Interaction, channel: discord.TextChannel, user: discord.Member):
+        super().__init__(timeout=60)
+        self.original_interaction = original_interaction
+        self.channel = channel
+        self.user = user
+    
+    @button(style=discord.ButtonStyle.success, label="✅ Да, закрыть", custom_id="confirm_close_btn")
+    async def confirm_btn(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.user.id:
+            await interaction.response.send_message("❌ Не ваше действие.", ephemeral=True)
+            return
+        await send_log(
+            bot, "🔒 ТИКЕТ ЗАКРЫТ",
+            f"{self.channel.mention} закрыт пользователем {self.user.mention}",
+            0x2ECC71,
+            [
+                {"name": "📋 Канал", "value": f"`{self.channel.name}`", "inline": True},
+                {"name": "👤 Закрыл", "value": f"`{self.user.name}`", "inline": True}
+            ]
+        )
+        await interaction.response.defer()
+        await self.channel.delete(reason="Тикет закрыт")
+    
+    @button(style=discord.ButtonStyle.secondary, label="❌ Отмена", custom_id="cancel_close_btn")
+    async def cancel_btn(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.user.id:
+            await interaction.response.send_message("❌ Не ваше действие.", ephemeral=True)
+            return
+        await interaction.response.edit_message(content="✅ Закрытие отменено.", view=None)
+
 # --- SELECT MENU ДЛЯ ВЫБОРА КАТЕГОРИИ ---
 class TicketCategorySelect(Select):
     def __init__(self, user: discord.Member):
@@ -116,9 +148,19 @@ class TicketCategorySelect(Select):
     async def create_ticket(self, interaction: discord.Interaction, ticket_type: str, config: dict):
         user = self.user
         
-        # Проверка: есть ли уже открытый тикет
+        # 🔧 ФОРМИРОВАНИЕ ИМЕНИ КАНАЛА: ticket-username
+        base_name = user.name.lower().replace(' ', '-').replace('_', '-')
+        sanitized_name = ''.join(c for c in base_name if c.isalnum() or c == '-')
+        channel_name = f"ticket-{sanitized_name}"
+        
+        # Проверка на дубликаты (если у двух пользователей одинаковый ник)
+        existing_channels = [ch for ch in interaction.guild.channels if ch.name == channel_name and ch.category_id == TICKET_CATEGORY_ID]
+        if existing_channels:
+            channel_name = f"{channel_name}-{user.discriminator}"
+        
+        # Проверка: есть ли уже открытый тикет у этого пользователя
         for channel in interaction.guild.channels:
-            if channel.name.startswith(f"ticket-{user.id}-") and channel.category_id == TICKET_CATEGORY_ID:
+            if channel.name.startswith(f"ticket-{sanitized_name}") and channel.category_id == TICKET_CATEGORY_ID:
                 await interaction.response.send_message(
                     f"⚠️ У вас уже есть открытый тикет: {channel.mention}",
                     ephemeral=True
@@ -136,8 +178,6 @@ class TicketCategorySelect(Select):
             if role:
                 overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
         
-        # Создание канала
-        channel_name = f"ticket-{user.id}-{ticket_type}"
         category = bot.get_channel(TICKET_CATEGORY_ID)
         
         if category is None:
@@ -170,9 +210,7 @@ class TicketCategorySelect(Select):
         embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
         embed.set_footer(text="🤖 AI Кардинал | Система поддержки")
         
-        # Кнопки управления (с классами для правильной обработки)
         view = TicketView(user)
-        
         await new_channel.send(embed=embed, view=view)
         await new_channel.send(f"🔔 На связи: {user.mention}")
         
@@ -183,7 +221,7 @@ class TicketCategorySelect(Select):
             config["color"],
             [
                 {"name": "📋 Категория", "value": f"`{config['label']}`", "inline": True},
-                {"name": "🆔 Канал", "value": f"{new_channel.mention}", "inline": True},
+                {"name": "🆔 Канал", "value": f"{new_channel.mention} (`{channel_name}`)", "inline": True},
                 {"name": "👤 Пользователь", "value": f"`{user.name} ({user.id})`", "inline": False}
             ],
             user.avatar.url if user.avatar else None
@@ -197,54 +235,25 @@ class TicketCategorySelect(Select):
 # --- VIEW ДЛЯ ТИКЕТА (с кнопками) ---
 class TicketView(View):
     def __init__(self, ticket_owner: discord.Member):
-        super().__init__(timeout=None)  # Persistent view
+        super().__init__(timeout=None)
         self.ticket_owner = ticket_owner
         
-    @discord.ui.button(style=discord.ButtonStyle.danger, label="Закрыть тикет", emoji="🔒", custom_id="close_ticket_btn")
+    @button(style=discord.ButtonStyle.danger, label="Закрыть тикет", emoji="🔒", custom_id="close_ticket_btn")
     async def close_button(self, interaction: discord.Interaction, button: Button):
         user = interaction.user
         channel = interaction.channel
         
         is_admin = any(role.id in ADMIN_ROLE_IDS for role in user.roles) or user.id == BOT_OWNER_ID
-        is_owner = channel.name.startswith(f"ticket-{self.ticket_owner.id}-")
+        is_owner = channel.name.startswith(f"ticket-{self.ticket_owner.name.lower().replace(' ', '-').replace('_', '-')}")
         
         if not is_admin and not is_owner:
             await interaction.response.send_message("⚠️ Нет прав для закрытия.", ephemeral=True)
             return
         
-        # Подтверждение закрытия
-        confirm_view = View(timeout=60)
-        
-        @discord.ui.button(style=discord.ButtonStyle.success, label="✅ Да, закрыть", custom_id="confirm_close_btn")
-        async def confirm_callback(inter: discord.Interaction, btn: Button):
-            if inter.user.id != user.id:
-                await inter.response.send_message("❌ Не ваше действие.", ephemeral=True)
-                return
-            await send_log(
-                bot, "🔒 ТИКЕТ ЗАКРЫТ",
-                f"{channel.mention} закрыт пользователем {user.mention}",
-                0x2ECC71,
-                [
-                    {"name": "📋 Канал", "value": f"`{channel.name}`", "inline": True},
-                    {"name": "👤 Закрыл", "value": f"`{user.name}`", "inline": True}
-                ]
-            )
-            await inter.response.defer()
-            await channel.delete(reason="Тикет закрыт")
-        
-        @discord.ui.button(style=discord.ButtonStyle.secondary, label="❌ Отмена", custom_id="cancel_close_btn")
-        async def cancel_callback(inter: discord.Interaction, btn: Button):
-            if inter.user.id != user.id:
-                await inter.response.send_message("❌ Не ваше действие.", ephemeral=True)
-                return
-            await inter.response.edit_message(content="✅ Закрытие отменено.", view=None)
-        
-        confirm_view.add_item(confirm_callback)
-        confirm_view.add_item(cancel_callback)
-        
+        confirm_view = ConfirmCloseView(interaction, channel, user)
         await interaction.response.send_message("⚠️ Закрыть тикет?", view=confirm_view, ephemeral=True)
     
-    @discord.ui.button(style=discord.ButtonStyle.primary, label="👨‍💼 Взять в работу", emoji="👨‍💼", custom_id="claim_ticket_btn")
+    @button(style=discord.ButtonStyle.primary, label="👨‍💼 Взять в работу", emoji="👨‍💼", custom_id="claim_ticket_btn")
     async def claim_button(self, interaction: discord.Interaction, button: Button):
         user = interaction.user
         if not any(role.id in ADMIN_ROLE_IDS for role in user.roles):
@@ -326,18 +335,16 @@ async def tickets(ctx):
         timestamp=datetime.utcnow()
     )
     embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
-    embed.set_footer(text="🤖 AI Кардинал | NeuroAI Support v2.2")
+    embed.set_footer(text="🤖 AI Кардинал | NeuroAI Support v3.0")
     
     view = TicketPanelView()
-    
     await ctx.send(embed=embed, view=view)
 
 # --- СОБЫТИЯ БОТА ---
 @bot.event
 async def on_ready():
-    # Регистрация постоянных видов (persistent views)
+    # Регистрация только панели тикетов (persistent view)
     bot.add_view(TicketPanelView())
-    bot.add_view(TicketView(bot.user))  # Placeholder, ticket_owner не важен для регистрации
     
     await bot.change_presence(
         status=discord.Status.dnd,
@@ -346,22 +353,86 @@ async def on_ready():
     print(f"🤖 AI Кардинал подключен...")
     print(f"📡 {bot.user.name} | 🆔 {bot.user.id}")
     print(f"🎫 Система тикетов: АКТИВНА")
+    print(f"📁 Формат тикетов: #ticket-username")
     print("-" * 30)
     await send_log(bot, "🟢 СИСТЕМА ЗАПУЩЕНА", "**AI Кардинал** подключился.", 0x2ECC71, [
         {"name": "📡 Статус", "value": "`Онлайн (DND)`", "inline": True},
-        {"name": "🎫 Тикеты", "value": "`Активны`", "inline": True}
+        {"name": "🎫 Тикеты", "value": "`Активны`", "inline": True},
+        {"name": "📁 Формат", "value": "`#ticket-username`", "inline": True}
     ])
 
 @bot.event
 async def on_member_join(member):
-    # (Код приветствия - сокращено)
-    pass
+    """Приветствие нового участника + авто-роль"""
+    try:
+        # Авто-выдача роли
+        try:
+            auto_role = discord.Object(id=AUTO_ROLE_ID)
+            await member.add_roles(auto_role)
+        except Exception as e:
+            print(f"⚠️ Не удалось выдать роль: {e}")
+        
+        # Приветствие
+        channel = bot.get_channel(WELCOME_CHANNEL_ID)
+        if channel:
+            embed = discord.Embed(
+                title="📡 ОБНАРУЖЕНО НОВОЕ ПОДКЛЮЧЕНИЕ",
+                description=(
+                    f"**Пользователь:** {member.mention}\n"
+                    f"**ID Системы:** `{member.id}`\n"
+                    f"**Статус:** Синхронизация завершена\n\n"
+                    f"Добро пожаловать в **GTA 5 NeuroAI RolePlay**.\n"
+                    f"Вам автоматически выдана роль доступа к системе.\n\n"
+                    f"⚠️ **ВНИМАНИЕ:** Нарушение протоколов приведет к блокировке доступа."
+                ),
+                color=0x9D00FF,
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(
+                name="📜 ОЗНАКОМЛЕНИЕ С ПРОТОКОЛАМИ",
+                value=f"Внимательно изучите правила в канале <#{RULES_CHANNEL_ID}>",
+                inline=False
+            )
+            embed.set_footer(text="🤖 AI Кардинал | NeuroAI System v1.0")
+            embed.set_thumbnail(url=member.avatar.url if member.avatar else member.default_avatar.url)
+            await channel.send(embed=embed)
+        
+        # Лог входа
+        await send_log(
+            bot, "👤 НОВЫЙ ПОЛЬЗОВАТЕЛЬ",
+            f"{member.mention} присоединился к симуляции.",
+            0x00BFFF,
+            [
+                {"name": "🆔 ID", "value": f"`{member.id}`", "inline": True},
+                {"name": "📛 Ник", "value": f"`{member.name}`", "inline": True},
+                {"name": "🎭 Авто-роль", "value": f"`<@&{AUTO_ROLE_ID}>`", "inline": True},
+                {"name": "📅 Аккаунт создан", "value": f"<t:{int(member.created_at.timestamp())}:R>", "inline": False}
+            ],
+            member.avatar.url if member.avatar else None
+        )
+    except Exception as e:
+        print(f"❌ Ошибка при обработке входа: {e}")
+
+@bot.event
+async def on_member_remove(member):
+    """Лог выхода участника"""
+    await send_log(
+        bot, "👤 ПОЛЬЗОВАТЕЛЬ ПОКИНУЛ СИСТЕМУ",
+        f"{member.mention} отключился от симуляции.",
+        0xDC143C,
+        [
+            {"name": "🆔 ID", "value": f"`{member.id}`", "inline": True},
+            {"name": "📛 Ник", "value": f"`{member.name}`", "inline": True},
+            {"name": "📅 Был на сервере", "value": f"<t:{int(member.joined_at.timestamp())}:R>" if member.joined_at else "N/A", "inline": True}
+        ],
+        member.avatar.url if member.avatar else None
+    )
 
 # --- ЗАПУСК ---
 if __name__ == "__main__":
     try:
         bot.run(TOKEN)
     except discord.LoginFailure:
-        print("❌ ОШИБКА: Неверный токен.")
+        print("❌ ОШИБКА: Неверный токен бота.")
     except Exception as e:
-        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА СИСТЕМЫ: {e}")
