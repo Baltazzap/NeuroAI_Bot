@@ -14,9 +14,10 @@ if not TOKEN:
 
 # --- НАСТРОЙКИ ИНТЕНТОВ (ПРАВА ДОСТУПА) ---
 intents = discord.Intents.default()
-intents.members = True
-intents.message_content = True
-intents.mod_actions = True
+intents.members = True  # Необходимо для отслеживания входа участников
+intents.message_content = True  # Необходимо для чтения содержимого сообщений
+intents.guilds = True  # Необходимо для отслеживания изменений сервера
+intents.bans = True  # Необходимо для логирования банов/разбанов
 
 # --- ИНИЦИАЛИЗАЦИЯ БОТА ---
 bot = commands.Bot(command_prefix="!", intents=intents)
