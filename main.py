@@ -1,9 +1,11 @@
 import os
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord.ui import Button, View, Select, button
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timedelta
+from collections import defaultdict, deque
+import re
 
 # --- ЗАГРУЗКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
 load_dotenv()
@@ -19,6 +21,7 @@ intents.members = True
 intents.message_content = True
 intents.guilds = True
 intents.bans = True
+intents.moderation = True
 
 # --- ИНИЦИАЛИЗАЦИЯ БОТА ---
 bot = commands.Bot(command_prefix="!", intents=intents, case_insensitive=True)
@@ -30,11 +33,29 @@ LOGS_CHANNEL_ID = 1482817870164656250
 AUTO_ROLE_ID = 1482807093286142083
 TICKET_CATEGORY_ID = 1482817236984008714
 BOT_OWNER_ID = 314805583788244993
+MUTE_ROLE_ID = 1482813904697692360  # Роль мута
 
 ADMIN_ROLE_IDS = [
     1482807083937169562, 1482807085791182978, 1482807086302760960,
     1482813905293017270, 1482813906085740724,
 ]
+
+# --- НАСТРОЙКИ АВТО-МОДЕРАЦИИ ---
+AUTO_MOD_CONFIG = {
+    "spam_threshold": 5,  # Сообщений за 10 секунд
+    "spam_time_window": 10,  # Секунды
+    "mention_threshold": 5,  # Максимум упоминаний в одном сообщении
+    "link_allowed_channels": [WELCOME_CHANNEL_ID, RULES_CHANNEL_ID],  # Каналы где ссылки разрешены
+    "bad_words": ["спам", "скам", "накрутка"],  # Стоп-слова (добавьте свои)
+    "raid_threshold": 10,  # Пользователей за 5 минут = рейд
+    "raid_time_window": 300,  # Секунды (5 минут)
+    "new_account_threshold": 7,  # Дней с момента создания аккаунта
+}
+
+# --- ХРАНИЛИЩА ДАННЫХ ---
+message_cooldown = defaultdict(lambda: deque())
+join_cooldown = deque()
+warns = defaultdict(int)
 
 # --- КАТЕГОРИИ ТИКЕТОВ ---
 TICKET_TYPES = {
@@ -86,6 +107,10 @@ async def send_log(bot, title, description, color, fields=None, thumbnail=None):
         await logs_channel.send(embed=embed)
     except Exception as e:
         print(f"⚠️ Ошибка отправки лога: {e}")
+
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ: ПРОВЕРКА ПРАВ АДМИНА ---
+def is_admin(member):
+    return any(role.id in ADMIN_ROLE_IDS for role in member.roles) or member.id == BOT_OWNER_ID
 
 # --- КНОПКА ПОДТВЕРЖДЕНИЯ ЗАКРЫТИЯ ---
 class ConfirmCloseView(View):
@@ -147,17 +172,14 @@ class TicketCategorySelect(Select):
     async def create_ticket(self, interaction: discord.Interaction, ticket_type: str, config: dict):
         user = self.user
         
-        # Формирование имени канала: ticket-username
         base_name = user.name.lower().replace(' ', '-').replace('_', '-')
         sanitized_name = ''.join(c for c in base_name if c.isalnum() or c == '-')
         channel_name = f"ticket-{sanitized_name}"
         
-        # Проверка на дубликаты
         existing_channels = [ch for ch in interaction.guild.channels if ch.name == channel_name and ch.category_id == TICKET_CATEGORY_ID]
         if existing_channels:
             channel_name = f"{channel_name}-{user.discriminator}"
         
-        # Проверка: есть ли уже открытый тикет
         for channel in interaction.guild.channels:
             if channel.name.startswith(f"ticket-{sanitized_name}") and channel.category_id == TICKET_CATEGORY_ID:
                 await interaction.response.send_message(
@@ -166,7 +188,6 @@ class TicketCategorySelect(Select):
                 )
                 return
         
-        # Настройка прав доступа
         overwrites = {
             interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
             user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
@@ -190,7 +211,6 @@ class TicketCategorySelect(Select):
             reason=f"Тикет: {user.name} — {config['label']}"
         )
         
-        # Приветственное сообщение в тикете
         embed = discord.Embed(
             title=f"{config['emoji']} {config['label']}",
             description=(
@@ -209,14 +229,12 @@ class TicketCategorySelect(Select):
         embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
         embed.set_footer(text="🤖 AI кардинал | Система поддержки")
         
-        # Извлекаем username из названия канала для проверки владельца
         owner_username = channel_name.replace('ticket-', '').split('-')[0] if '-' in channel_name else channel_name.replace('ticket-', '')
         view = TicketView(owner_username)
         
         await new_channel.send(embed=embed, view=view)
         await new_channel.send(f"🔔 На связи: {user.mention}")
         
-        # Лог создания
         await send_log(
             bot, "🎫 Тикет создан",
             f"{user.mention} создал тикет: {config['label']}",
@@ -234,10 +252,10 @@ class TicketCategorySelect(Select):
             ephemeral=True
         )
 
-# --- VIEW ДЛЯ ТИКЕТА (с кнопками) ---
+# --- VIEW ДЛЯ ТИКЕТА ---
 class TicketView(View):
     def __init__(self, owner_username: str):
-        super().__init__(timeout=None)  # Persistent view - работает после перезапуска
+        super().__init__(timeout=None)
         self.owner_username = owner_username
         
     @button(style=discord.ButtonStyle.danger, label="Закрыть тикет", emoji="🔒", custom_id="close_ticket_btn")
@@ -246,9 +264,7 @@ class TicketView(View):
         channel = interaction.channel
         
         is_admin = any(role.id in ADMIN_ROLE_IDS for role in user.roles) or user.id == BOT_OWNER_ID
-        
-        # Проверка владельца через имя канала
-        channel_owner = channel.name.replace('ticket-', '').split('-')[0] if '-' in channel_name else channel.name.replace('ticket-', '')
+        channel_owner = channel.name.replace('ticket-', '').split('-')[0] if '-' in channel.name else channel.name.replace('ticket-', '')
         is_owner = channel_owner.lower() == user.name.lower()
         
         if not is_admin and not is_owner:
@@ -311,7 +327,7 @@ class CreateTicketButton(Button):
 # --- VIEW ДЛЯ ПАНЕЛИ ТИКЕТОВ ---
 class TicketPanelView(View):
     def __init__(self):
-        super().__init__(timeout=None)  # Persistent view
+        super().__init__(timeout=None)
         self.add_item(CreateTicketButton())
 
 # --- КОМАНДА: !tickets ---
@@ -340,88 +356,200 @@ async def tickets(ctx):
         timestamp=datetime.utcnow()
     )
     embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
-    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v3.1")
+    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v4.0")
     
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
 
-# --- СОБЫТИЯ БОТА ---
-@bot.event
-async def on_ready():
-    # Регистрация persistent views - кнопки работают после перезапуска!
-    bot.add_view(TicketPanelView())
-    
-    await bot.change_presence(
-        status=discord.Status.dnd,
-        activity=discord.Activity(type=discord.ActivityType.watching, name="за симуляцией NeuroAI")
-    )
-    print(f"🤖 AI кардинал подключен...")
-    print(f"📡 {bot.user.name} | 🆔 {bot.user.id}")
-    print(f"🎫 Система тикетов: активна")
-    print(f"📁 Формат тикетов: #ticket-username")
-    print(f"🔄 Кнопки: постоянные (persistent)")
-    print("-" * 30)
-    await send_log(bot, "🟢 Система запущена", "**AI кардинал** подключился.", 0x2ECC71, [
-        {"name": "📡 Статус", "value": "`Онлайн (DND)`", "inline": True},
-        {"name": "🎫 Тикеты", "value": "`Активны`", "inline": True},
-        {"name": "📁 Формат", "value": "`#ticket-username`", "inline": True}
-    ])
+# ============================================
+# 🛡️ СИСТЕМА АВТО-МОДЕРАЦИИ И ЗАЩИТЫ ОТ РЕЙДОВ
+# ============================================
 
+# --- ПРОВЕРКА НА СПАМ ---
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    
+    # Пропускаем админов
+    if is_admin(message.author):
+        await bot.process_commands(message)
+        return
+    
+    now = datetime.utcnow()
+    
+    # 1. Проверка на спам (много сообщений за короткое время)
+    message_cooldown[message.author.id].append(now)
+    while message_cooldown[message.author.id] and now - message_cooldown[message.author.id][0] > timedelta(seconds=AUTO_MOD_CONFIG["spam_time_window"]):
+        message_cooldown[message.author.id].popleft()
+    
+    if len(message_cooldown[message.author.id]) > AUTO_MOD_CONFIG["spam_threshold"]:
+        await mute_user(message.author, "Спам", message.channel)
+        message_cooldown[message.author.id].clear()
+        return
+    
+    # 2. Проверка на массовые упоминания
+    if len(message.mentions) > AUTO_MOD_CONFIG["mention_threshold"]:
+        await mute_user(message.author, "Массовые упоминания", message.channel)
+        return
+    
+    # 3. Проверка на ссылки (в запрещённых каналах)
+    if message.channel.id not in AUTO_MOD_CONFIG["link_allowed_channels"]:
+        url_pattern = r'https?://\S+|www\.\S+'
+        if re.search(url_pattern, message.content):
+            await message.delete()
+            await mute_user(message.author, "Отправка ссылок", message.channel)
+            return
+    
+    # 4. Проверка на стоп-слова
+    content_lower = message.content.lower()
+    for bad_word in AUTO_MOD_CONFIG["bad_words"]:
+        if bad_word in content_lower:
+            await message.delete()
+            await mute_user(message.author, f"Стоп-слово: {bad_word}", message.channel)
+            return
+    
+    # 5. Проверка на капс (более 70% заглавных букв)
+    if len(message.content) > 10:
+        caps_ratio = sum(1 for c in message.content if c.isupper()) / len(message.content)
+        if caps_ratio > 0.7:
+            await message.delete()
+            await mute_user(message.author, "Злоупотребление капсом", message.channel)
+            return
+    
+    await bot.process_commands(message)
+
+# --- ФУНКЦИЯ: МУТ ПОЛЬЗОВАТЕЛЯ ---
+async def mute_user(member, reason, channel=None):
+    mute_role = discord.Object(id=MUTE_ROLE_ID)
+    
+    # Выдаём роль мута
+    await member.add_roles(mute_role, reason=f"AutoMod: {reason}")
+    
+    # Удаляем сообщения пользователя за последние 5 минут
+    try:
+        if channel:
+            async for msg in channel.history(limit=100):
+                if msg.author == member:
+                    await msg.delete()
+    except:
+        pass
+    
+    # Лог
+    await send_log(
+        bot, "🔇 Пользователь заглушен (AutoMod)",
+        f"{member.mention} получил мут автоматически.",
+        0xFF6B6B,
+        [
+            {"name": "👤 Пользователь", "value": f"`{member.name} ({member.id})`", "inline": True},
+            {"name": "📋 Причина", "value": f"`{reason}`", "inline": True},
+            {"name": "⏱️ Длительность", "value": "`Навсегда`", "inline": True}
+        ],
+        member.avatar.url if member.avatar else None
+    )
+    
+    # Уведомление пользователю
+    try:
+        await member.send(f"⚠️ Вы были заглушены автоматически.\n**Причина:** {reason}\n\nОбратитесь в тикет для разблокировки.")
+    except:
+        pass
+
+# --- ЗАЩИТА ОТ РЕЙДОВ (МАССОВЫЙ ВХОД) ---
 @bot.event
 async def on_member_join(member):
-    """Приветствие нового участника + авто-роль"""
-    try:
-        # Авто-выдача роли
-        try:
-            auto_role = discord.Object(id=AUTO_ROLE_ID)
-            await member.add_roles(auto_role)
-        except Exception as e:
-            print(f"⚠️ Не удалось выдать роль: {e}")
-        
-        # Приветствие
-        channel = bot.get_channel(WELCOME_CHANNEL_ID)
-        if channel:
-            embed = discord.Embed(
-                title="📡 Обнаружено новое подключение",
-                description=(
-                    f"**Пользователь:** {member.mention}\n"
-                    f"**ID системы:** `{member.id}`\n"
-                    f"**Статус:** Синхронизация завершена\n\n"
-                    f"Добро пожаловать в **GTA 5 NeuroAI RolePlay**.\n"
-                    f"Вам автоматически выдана роль доступа к системе.\n\n"
-                    f"⚠️ Внимание: нарушение протоколов приведет к блокировке доступа."
-                ),
-                color=0x9D00FF,
-                timestamp=datetime.utcnow()
-            )
-            embed.add_field(
-                name="📜 Ознакомление с протоколами",
-                value=f"Внимательно изучите правила в канале <#{RULES_CHANNEL_ID}>",
-                inline=False
-            )
-            embed.set_footer(text="🤖 AI кардинал | NeuroAI system v1.0")
-            embed.set_thumbnail(url=member.avatar.url if member.avatar else member.default_avatar.url)
-            await channel.send(embed=embed)
-        
-        # Лог входа
+    now = datetime.utcnow()
+    join_cooldown.append((member, now))
+    
+    # Удаляем старые записи
+    while join_cooldown and now - join_cooldown[0][1] > timedelta(seconds=AUTO_MOD_CONFIG["raid_time_window"]):
+        join_cooldown.popleft()
+    
+    # Проверка на рейд
+    if len(join_cooldown) > AUTO_MOD_CONFIG["raid_threshold"]:
+        # Включаем режим защиты
         await send_log(
-            bot, "👤 Новый пользователь",
-            f"{member.mention} присоединился к симуляции.",
-            0x00BFFF,
+            bot, "🚨 ОБНАРУЖЕН РЕЙД!",
+            f"Зафиксирован массовый вход пользователей ({len(join_cooldown)} за {AUTO_MOD_CONFIG['raid_time_window']} сек).",
+            0xFF0000,
             [
-                {"name": "🆔 ID", "value": f"`{member.id}`", "inline": True},
-                {"name": "📛 Ник", "value": f"`{member.name}`", "inline": True},
-                {"name": "🎭 Авто-роль", "value": f"`<@&{AUTO_ROLE_ID}>`", "inline": True},
-                {"name": "📅 Аккаунт создан", "value": f"<t:{int(member.created_at.timestamp())}:R>", "inline": False}
-            ],
-            member.avatar.url if member.avatar else None
+                {"name": "🔒 Режим защиты", "value": "`АКТИВИРОВАН`", "inline": True},
+                {"name": "👥 Вошло пользователей", "value": f"`{len(join_cooldown)}`", "inline": True}
+            ]
         )
+        
+        # Баним всех новых пользователей
+        for new_member, join_time in join_cooldown:
+            if now - join_time < timedelta(seconds=AUTO_MOD_CONFIG["raid_time_window"]):
+                try:
+                    await new_member.ban(reason="AutoMod: Рейд")
+                    await send_log(
+                        bot, "🔨 Пользователь забанен (Anti-Raid)",
+                        f"{new_member.mention} забанен за участие в рейде.",
+                        0xFF0000,
+                        [
+                            {"name": "👤 Пользователь", "value": f"`{new_member.name}`", "inline": True},
+                            {"name": "📅 Аккаунт создан", "value": f"<t:{int(new_member.created_at.timestamp())}:R>", "inline": True}
+                        ]
+                    )
+                except:
+                    pass
+        
+        join_cooldown.clear()
+        return
+    
+    # Проверка на новый аккаунт (менее 7 дней)
+    account_age = (now - member.created_at).days
+    if account_age < AUTO_MOD_CONFIG["new_account_threshold"]:
+        await mute_user(member, f"Новый аккаунт ({account_age} дн.)")
+    
+    # Авто-выдача роли
+    try:
+        auto_role = discord.Object(id=AUTO_ROLE_ID)
+        await member.add_roles(auto_role)
     except Exception as e:
-        print(f"❌ Ошибка при обработке входа: {e}")
+        print(f"⚠️ Не удалось выдать роль: {e}")
+    
+    # Приветствие
+    channel = bot.get_channel(WELCOME_CHANNEL_ID)
+    if channel:
+        embed = discord.Embed(
+            title="📡 Обнаружено новое подключение",
+            description=(
+                f"**Пользователь:** {member.mention}\n"
+                f"**ID системы:** `{member.id}`\n"
+                f"**Статус:** Синхронизация завершена\n\n"
+                f"Добро пожаловать в **GTA 5 NeuroAI RolePlay**.\n"
+                f"Вам автоматически выдана роль доступа к системе.\n\n"
+                f"⚠️ Внимание: нарушение протоколов приведет к блокировке доступа."
+            ),
+            color=0x9D00FF,
+            timestamp=datetime.utcnow()
+        )
+        embed.add_field(
+            name="📜 Ознакомление с протоколами",
+            value=f"Внимательно изучите правила в канале <#{RULES_CHANNEL_ID}>",
+            inline=False
+        )
+        embed.set_footer(text="🤖 AI кардинал | NeuroAI system v1.0")
+        embed.set_thumbnail(url=member.avatar.url if member.avatar else member.default_avatar.url)
+        await channel.send(embed=embed)
+    
+    # Лог входа
+    await send_log(
+        bot, "👤 Новый пользователь",
+        f"{member.mention} присоединился к симуляции.",
+        0x00BFFF,
+        [
+            {"name": "🆔 ID", "value": f"`{member.id}`", "inline": True},
+            {"name": "📛 Ник", "value": f"`{member.name}`", "inline": True},
+            {"name": "🎭 Авто-роль", "value": f"`<@&{AUTO_ROLE_ID}>`", "inline": True},
+            {"name": "📅 Аккаунт создан", "value": f"<t:{int(member.created_at.timestamp())}:R>", "inline": False}
+        ],
+        member.avatar.url if member.avatar else None
+    )
 
 @bot.event
 async def on_member_remove(member):
-    """Лог выхода участника"""
     await send_log(
         bot, "👤 Пользователь покинул систему",
         f"{member.mention} отключился от симуляции.",
@@ -433,6 +561,132 @@ async def on_member_remove(member):
         ],
         member.avatar.url if member.avatar else None
     )
+
+# ============================================
+# ⚙️ АДМИН-КОМАНДЫ ДЛЯ МОДЕРАЦИИ
+# ============================================
+
+@bot.command()
+@commands.has_permissions(manage_roles=True)
+async def mute(ctx, member: discord.Member, *, reason: str = "Нарушение правил"):
+    """Заглушить пользователя"""
+    if not is_admin(ctx.author):
+        await ctx.send("⚠️ Недостаточно прав.", ephemeral=True)
+        return
+    
+    mute_role = discord.Object(id=MUTE_ROLE_ID)
+    await member.add_roles(mute_role, reason=f"Moderator: {reason}")
+    
+    await send_log(
+        bot, "🔇 Пользователь заглушен",
+        f"{member.mention} получил мут от {ctx.author.mention}.",
+        0xFF6B6B,
+        [
+            {"name": "👤 Пользователь", "value": f"`{member.name}`", "inline": True},
+            {"name": "👮 Модератор", "value": f"`{ctx.author.name}`", "inline": True},
+            {"name": "📋 Причина", "value": f"`{reason}`", "inline": False}
+        ]
+    )
+    await ctx.send(f"✅ {member.mention} заглушен. Причина: {reason}")
+
+@bot.command()
+@commands.has_permissions(manage_roles=True)
+async def unmute(ctx, member: discord.Member):
+    """Разглушить пользователя"""
+    if not is_admin(ctx.author):
+        await ctx.send("⚠️ Недостаточно прав.", ephemeral=True)
+        return
+    
+    mute_role = discord.utils.get(ctx.guild.roles, id=MUTE_ROLE_ID)
+    if mute_role in member.roles:
+        await member.remove_roles(mute_role, reason=f"Moderator: {ctx.author.name}")
+        await send_log(
+            bot, "🔊 Пользователь разглушен",
+            f"{member.mention} разглушен пользователем {ctx.author.mention}.",
+            0x2ECC71,
+            [
+                {"name": "👤 Пользователь", "value": f"`{member.name}`", "inline": True},
+                {"name": "👮 Модератор", "value": f"`{ctx.author.name}`", "inline": True}
+            ]
+        )
+        await ctx.send(f"✅ {member.mention} разглушен.")
+    else:
+        await ctx.send("⚠️ У пользователя нет роли мута.")
+
+@bot.command()
+@commands.has_permissions(manage_roles=True)
+async def warn(ctx, member: discord.Member, *, reason: str = "Нарушение правил"):
+    """Выдать предупреждение"""
+    if not is_admin(ctx.author):
+        await ctx.send("⚠️ Недостаточно прав.", ephemeral=True)
+        return
+    
+    warns[member.id] += 1
+    await send_log(
+        bot, "⚠️ Пользователь предупреждён",
+        f"{member.mention} получил предупреждение от {ctx.author.mention}.",
+        0xFFA500,
+        [
+            {"name": "👤 Пользователь", "value": f"`{member.name}`", "inline": True},
+            {"name": "👮 Модератор", "value": f"`{ctx.author.name}`", "inline": True},
+            {"name": "📋 Причина", "value": f"`{reason}`", "inline": False},
+            {"name": "⚠️ Предупреждений", "value": f"`{warns[member.id]}`", "inline": True}
+        ]
+    )
+    await ctx.send(f"⚠️ {member.mention} предупреждён. Причина: {reason}\nВсего предупреждений: {warns[member.id]}/3")
+    
+    # Авто-мут после 3 предупреждений
+    if warns[member.id] >= 3:
+        await mute(ctx, member, reason="3 предупреждения")
+        warns[member.id] = 0
+
+@bot.command()
+@commands.has_permissions(manage_roles=True)
+async def warns(ctx, member: discord.Member):
+    """Проверить предупреждения пользователя"""
+    if not is_admin(ctx.author):
+        await ctx.send("⚠️ Недостаточно прав.", ephemeral=True)
+        return
+    
+    await ctx.send(f"📋 У {member.mention} **{warns[member.id]}** предупреждений из 3.")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def raidmode(ctx, status: str):
+    """Включить/выключить режим защиты от рейдов"""
+    if not is_admin(ctx.author):
+        await ctx.send("⚠️ Недостаточно прав.", ephemeral=True)
+        return
+    
+    if status.lower() in ["on", "вкл", "true"]:
+        AUTO_MOD_CONFIG["raid_threshold"] = 3  # Ужесточаем
+        await ctx.send("🚨 Режим защиты от рейдов: **ВКЛЮЧЕН**")
+        await send_log(bot, "🚨 Режим защиты от рейдов", "Активирован администратором.", 0xFF0000)
+    else:
+        AUTO_MOD_CONFIG["raid_threshold"] = 10  # Возвращаем
+        await ctx.send("✅ Режим защиты от рейдов: **ВЫКЛЮЧЕН**")
+        await send_log(bot, "🚨 Режим защиты от рейдов", "Деактивирован администратором.", 0x2ECC71)
+
+# --- СОБЫТИЯ БОТА ---
+@bot.event
+async def on_ready():
+    bot.add_view(TicketPanelView())
+    
+    await bot.change_presence(
+        status=discord.Status.dnd,
+        activity=discord.Activity(type=discord.ActivityType.watching, name="за симуляцией NeuroAI")
+    )
+    print(f"🤖 AI кардинал подключен...")
+    print(f"📡 {bot.user.name} | 🆔 {bot.user.id}")
+    print(f"🎫 Система тикетов: активна")
+    print(f"🛡️ Авто-модерация: активна")
+    print(f"🔇 Роль мута: {MUTE_ROLE_ID}")
+    print("-" * 30)
+    await send_log(bot, "🟢 Система запущена", "**AI кардинал** подключился.", 0x2ECC71, [
+        {"name": "📡 Статус", "value": "`Онлайн (DND)`", "inline": True},
+        {"name": "🎫 Тикеты", "value": "`Активны`", "inline": True},
+        {"name": "🛡️ Авто-мод", "value": "`Активен`", "inline": True}
+    ])
 
 # --- ЗАПУСК ---
 if __name__ == "__main__":
