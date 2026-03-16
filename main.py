@@ -39,31 +39,31 @@ ADMIN_ROLE_IDS = [
 # --- КАТЕГОРИИ ТИКЕТОВ ---
 TICKET_TYPES = {
     "help_player": {
-        "label": "🎫 Помощь игроку",
+        "label": "Помощь игроку",
         "description": "Вопросы по геймплею, баги, проблемы с доступом, управление персонажем",
         "emoji": "🎫",
         "color": 0x00BFFF
     },
     "report_player": {
-        "label": "⚠️ Жалоба на игрока",
+        "label": "Жалоба на игрока",
         "description": "Нарушения правил, токсичность, гриферство, неправомерные действия администрации",
         "emoji": "⚠️",
         "color": 0xFF6B6B
     },
     "suggestion": {
-        "label": "💡 Предложение",
+        "label": "Предложение",
         "description": "Идеи по улучшению сервера, новые механики, баланс, контент",
         "emoji": "💡",
         "color": 0xFFD700
     },
     "tech_support": {
-        "label": "🔧 Техническая поддержка",
+        "label": "Техническая поддержка",
         "description": "Проблемы с лаунчером, подключением, донатом, установкой модов",
         "emoji": "🔧",
         "color": 0x9D00FF
     },
     "rp_event": {
-        "label": "🎭 Сюжет и ивент",
+        "label": "Сюжет и ивент",
         "description": "Предложения по ролевым событиям, историям, сотрудничество с фракциями",
         "emoji": "🎭",
         "color": 0xE91E63
@@ -200,7 +200,7 @@ class CreateTicketButton(Button):
     def __init__(self):
         super().__init__(
             style=discord.ButtonStyle.primary,
-            label="🎫 Создать обращение",
+            label="Создать обращение",
             emoji="🎫",
             custom_id="create_ticket_btn"
         )
@@ -222,7 +222,7 @@ class CreateTicketButton(Button):
 # --- КНОПКА: ЗАКРЫТИЕ ТИКЕТА ---
 class CloseTicketButton(Button):
     def __init__(self):
-        super().__init__(style=discord.ButtonStyle.danger, label="🔒 Закрыть тикет", emoji="🔒", custom_id="close_ticket")
+        super().__init__(style=discord.ButtonStyle.danger, label="Закрыть тикет", emoji="🔒", custom_id="close_ticket")
 
     async def callback(self, interaction: discord.Interaction):
         user = interaction.user
