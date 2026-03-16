@@ -115,7 +115,7 @@ def is_admin(member):
 # --- ФУНКЦИЯ: УДАЛЕНИЕ СООБЩЕНИЯ КОМАНДЫ ---
 async def delete_command_message(ctx):
     try:
-        if ctx.message:
+        if hasattr(ctx, 'message') and ctx.message:
             await ctx.message.delete()
     except:
         pass
@@ -402,7 +402,7 @@ async def tickets(ctx):
         timestamp=datetime.now(timezone.utc)
     )
     embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
-    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v6.1")
+    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v6.3")
     
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
@@ -653,16 +653,12 @@ async def on_member_remove(member):
     )
 
 # ============================================
-# ⚙️ SLASH КОМАНДЫ (РЕГИСТРАЦИЯ В on_ready)
+# ⚙️ SLASH КОМАНДЫ (/)
 # ============================================
 
 @bot.event
 async def on_ready():
-    # Регистрация persistent views
     bot.add_view(TicketPanelView())
-    
-    # ✅ РЕГИСТРАЦИЯ SLASH КОМАНД
-    tree.clear_commands(guild=None)  # Очищаем глобальные команды
     
     # Команда: mute
     @tree.command(name="mute", description="Заглушить пользователя на указанное время")
@@ -805,8 +801,9 @@ async def on_ready():
             await interaction.response.send_message("⚠️ Количество должно быть от 1 до 100.", ephemeral=True)
             return
         
+        await interaction.response.defer(ephemeral=True)
         deleted = await interaction.channel.purge(limit=amount)
-        await interaction.response.send_message(f"🗑️ Удалено {len(deleted)} сообщений.", ephemeral=True)
+        await interaction.followup.send(f"🗑️ Удалено {len(deleted)} сообщений.", ephemeral=True)
         
         await send_log(
             bot, "🗑️ Сообщения очищены",
@@ -821,11 +818,10 @@ async def on_ready():
     # ✅ СИНХРОНИЗАЦИЯ КОМАНД
     try:
         await tree.sync()
-        print(f"✅ Slash команды синхронизированы ({len(tree.commands)} команд)")
+        print(f"✅ Slash команды синхронизированы (6 команд)")
     except Exception as e:
         print(f"⚠️ Ошибка синхронизации команд: {e}")
     
-    # Запуск проверки мутов
     check_mutes_task.start()
     
     await bot.change_presence(
@@ -839,14 +835,168 @@ async def on_ready():
     print(f"🔇 Роль мута: {MUTE_ROLE_ID}")
     print(f"👋 Канал приветствий: {WELCOME_CHANNEL_ID}")
     print(f"🎭 Авто-роль: {AUTO_ROLE_ID}")
-    print(f"⚙️ Slash команды: активны")
+    print(f"⚙️ Команды: / и !")
     print("-" * 30)
     await send_log(bot, "🟢 Система запущена", "**AI кардинал** подключился.", 0x2ECC71, [
         {"name": "📡 Статус", "value": "`Онлайн (DND)`", "inline": True},
         {"name": "🎫 Тикеты", "value": "`Активны`", "inline": True},
         {"name": "🛡️ Авто-мод", "value": "`Активен`", "inline": True},
-        {"name": "⚙️ Команды", "value": f"`{len(tree.commands)} slash`", "inline": True}
+        {"name": "⚙️ Команды", "value": "`/ и !`", "inline": True}
     ])
+
+# ============================================
+# ⚙️ PREFIX КОМАНДЫ (!)
+# ============================================
+
+@bot.command(name="mute")
+@commands.has_permissions(manage_roles=True)
+async def prefix_mute(ctx, member: discord.Member, duration: int, *, reason: str = "Нарушение правил"):
+    """Заглушить пользователя на указанное время (!mute)"""
+    if not is_admin(ctx.author):
+        await ctx.send("⚠️ Недостаточно прав.", delete_after=5)
+        return
+    
+    mute_role = discord.Object(id=MUTE_ROLE_ID)
+    await member.add_roles(mute_role, reason=f"Moderator: {reason}")
+    
+    end_time = datetime.now(timezone.utc) + timedelta(minutes=duration)
+    mutes[member.id] = {
+        "end_time": end_time,
+        "guild_id": ctx.guild.id,
+        "duration": f"{duration} мин."
+    }
+    
+    await send_log(
+        bot, "🔇 Пользователь заглушен",
+        f"{member.mention} получил мут от {ctx.author.mention}.",
+        0xFF6B6B,
+        [
+            {"name": "👤 Пользователь", "value": f"`{member.name}`", "inline": True},
+            {"name": "👮 Модератор", "value": f"`{ctx.author.name}`", "inline": True},
+            {"name": "📋 Причина", "value": f"`{reason}`", "inline": True},
+            {"name": "⏱️ Длительность", "value": f"`{duration} мин.`", "inline": True}
+        ]
+    )
+    
+    await ctx.send(f"✅ {member.mention} заглушен на {duration} мин. Причина: {reason}", delete_after=10)
+    await delete_command_message(ctx)
+
+@bot.command(name="unmute")
+@commands.has_permissions(manage_roles=True)
+async def prefix_unmute(ctx, member: discord.Member):
+    """Разглушить пользователя (!unmute)"""
+    if not is_admin(ctx.author):
+        await ctx.send("⚠️ Недостаточно прав.", delete_after=5)
+        return
+    
+    mute_role = discord.utils.get(ctx.guild.roles, id=MUTE_ROLE_ID)
+    if mute_role in member.roles:
+        await member.remove_roles(mute_role, reason=f"Moderator: {ctx.author.name}")
+        
+        if member.id in mutes:
+            mutes.pop(member.id)
+        
+        await send_log(
+            bot, "🔊 Пользователь разглушен",
+            f"{member.mention} разглушен пользователем {ctx.author.mention}.",
+            0x2ECC71,
+            [
+                {"name": "👤 Пользователь", "value": f"`{member.name}`", "inline": True},
+                {"name": "👮 Модератор", "value": f"`{ctx.author.name}`", "inline": True}
+            ]
+        )
+        await ctx.send(f"✅ {member.mention} разглушен.", delete_after=10)
+    else:
+        await ctx.send("⚠️ У пользователя нет роли мута.", delete_after=5)
+    
+    await delete_command_message(ctx)
+
+@bot.command(name="warn")
+@commands.has_permissions(manage_roles=True)
+async def prefix_warn(ctx, member: discord.Member, *, reason: str = "Нарушение правил"):
+    """Выдать предупреждение пользователю (!warn)"""
+    if not is_admin(ctx.author):
+        await ctx.send("⚠️ Недостаточно прав.", delete_after=5)
+        return
+    
+    warns[member.id] += 1
+    await send_log(
+        bot, "⚠️ Пользователь предупреждён",
+        f"{member.mention} получил предупреждение от {ctx.author.mention}.",
+        0xFFA500,
+        [
+            {"name": "👤 Пользователь", "value": f"`{member.name}`", "inline": True},
+            {"name": "👮 Модератор", "value": f"`{ctx.author.name}`", "inline": True},
+            {"name": "📋 Причина", "value": f"`{reason}`", "inline": False},
+            {"name": "⚠️ Предупреждений", "value": f"`{warns[member.id]}`", "inline": True}
+        ]
+    )
+    await ctx.send(f"⚠️ {member.mention} предупреждён. Причина: {reason}\nВсего предупреждений: {warns[member.id]}/3", delete_after=10)
+    
+    if warns[member.id] >= 3:
+        mute_role = discord.Object(id=MUTE_ROLE_ID)
+        await member.add_roles(mute_role, reason="3 предупреждения")
+        warns[member.id] = 0
+        await ctx.send(f"🔇 {member.mention} получил мут за 3 предупреждения.", delete_after=10)
+    
+    await delete_command_message(ctx)
+
+@bot.command(name="warns")
+@commands.has_permissions(manage_roles=True)
+async def prefix_warns(ctx, member: discord.Member):
+    """Проверить предупреждения пользователя (!warns)"""
+    if not is_admin(ctx.author):
+        await ctx.send("⚠️ Недостаточно прав.", delete_after=5)
+        return
+    
+    await ctx.send(f"📋 У {member.mention} **{warns[member.id]}** предупреждений из 3.", delete_after=10)
+    await delete_command_message(ctx)
+
+@bot.command(name="raidmode")
+@commands.has_permissions(administrator=True)
+async def prefix_raidmode(ctx, status: str):
+    """Включить/выключить режим защиты от рейдов (!raidmode)"""
+    if not is_admin(ctx.author):
+        await ctx.send("⚠️ Недостаточно прав.", delete_after=5)
+        return
+    
+    if status.lower() in ["on", "вкл", "true"]:
+        AUTO_MOD_CONFIG["raid_threshold"] = 3
+        await ctx.send("🚨 Режим защиты от рейдов: **ВКЛЮЧЕН**", delete_after=10)
+        await send_log(bot, "🚨 Режим защиты от рейдов", "Активирован администратором.", 0xFF0000)
+    else:
+        AUTO_MOD_CONFIG["raid_threshold"] = 10
+        await ctx.send("✅ Режим защиты от рейдов: **ВЫКЛЮЧЕН**", delete_after=10)
+        await send_log(bot, "🚨 Режим защиты от рейдов", "Деактивирован администратором.", 0x2ECC71)
+    
+    await delete_command_message(ctx)
+
+@bot.command(name="clear")
+@commands.has_permissions(manage_messages=True)
+async def prefix_clear(ctx, amount: int):
+    """Очистить сообщения в канале (!clear)"""
+    if not is_admin(ctx.author):
+        await ctx.send("⚠️ Недостаточно прав.", delete_after=5)
+        return
+    
+    if amount < 1 or amount > 100:
+        await ctx.send("⚠️ Количество должно быть от 1 до 100.", delete_after=5)
+        return
+    
+    deleted = await ctx.channel.purge(limit=amount)
+    await ctx.send(f"🗑️ Удалено {len(deleted)} сообщений.", delete_after=10)
+    
+    await send_log(
+        bot, "🗑️ Сообщения очищены",
+        f"{ctx.author.mention} очистил {len(deleted)} сообщений в {ctx.channel.mention}.",
+        0xFF6B6B,
+        [
+            {"name": "👮 Модератор", "value": f"`{ctx.author.name}`", "inline": True},
+            {"name": "📊 Удалено", "value": f"`{len(deleted)}`", "inline": True}
+        ]
+    )
+    
+    await delete_command_message(ctx)
 
 # ============================================
 # 🚀 ЗАПУСК
