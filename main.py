@@ -1,11 +1,13 @@
 import os
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord.ui import Button, View, Select, button
+from discord.app_commands import CommandTree, command, describe, choices
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 import re
+import asyncio
 
 # --- ЗАГРУЗКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
 load_dotenv()
@@ -21,6 +23,7 @@ intents.message_content = True
 
 # --- ИНИЦИАЛИЗАЦИЯ БОТА ---
 bot = commands.Bot(command_prefix="!", intents=intents, case_insensitive=True)
+tree = bot.tree
 
 # --- КОНФИГУРАЦИЯ ---
 WELCOME_CHANNEL_ID = 1482814888509444298
@@ -52,6 +55,7 @@ AUTO_MOD_CONFIG = {
 message_cooldown = defaultdict(lambda: deque())
 join_cooldown = deque()
 warns = defaultdict(int)
+mutes = {}  # {user_id: {"end_time": datetime, "task": asyncio.Task}}
 
 # --- КАТЕГОРИИ ТИКЕТОВ ---
 TICKET_TYPES = {
@@ -108,11 +112,51 @@ async def send_log(bot, title, description, color, fields=None, thumbnail=None):
 def is_admin(member):
     return any(role.id in ADMIN_ROLE_IDS for role in member.roles) or member.id == BOT_OWNER_ID
 
+# --- ФУНКЦИЯ: АВТО-УДАЛЕНИЕ СООБЩЕНИЯ КОМАНДЫ ---
+async def delete_command_message(ctx):
+    """Удаляет сообщение с командой после выполнения"""
+    try:
+        if ctx.message:
+            await ctx.message.delete()
+    except:
+        pass
+
+# --- ФУНКЦИЯ: ПРОВЕРКА МУТОВ ---
+async def check_mutes():
+    """Проверяет истёкшие муты и снимает роль"""
+    now = datetime.now(timezone.utc)
+    to_remove = []
+    
+    for user_id, mute_data in mutes.items():
+        if mute_data["end_time"] <= now:
+            to_remove.append(user_id)
+    
+    for user_id in to_remove:
+        try:
+            mute_data = mutes.pop(user_id)
+            guild = bot.get_guild(mute_data["guild_id"])
+            if guild:
+                member = guild.get_member(user_id)
+                if member:
+                    mute_role = discord.Object(id=MUTE_ROLE_ID)
+                    await member.remove_roles(mute_role, reason="Мут истёк")
+                    
+                    await send_log(
+                        bot, "🔊 Мут истёк",
+                        f"С пользователя {member.mention} автоматически снят мут.",
+                        0x2ECC71,
+                        [
+                            {"name": "👤 Пользователь", "value": f"`{member.name}`", "inline": True},
+                            {"name": "⏱️ Длительность", "value": f"`{mute_data['duration']}`", "inline": True}
+                        ]
+                    )
+        except Exception as e:
+            print(f"⚠️ Ошибка при снятии мута: {e}")
+
 # ============================================
-# 🎫 СИСТЕМА ТИКЕТОВ (ИСПРАВЛЕНА)
+# 🎫 СИСТЕМА ТИКЕТОВ
 # ============================================
 
-# --- КНОПКА ПОДТВЕРЖДЕНИЯ ЗАКРЫТИЯ ---
 class ConfirmCloseView(View):
     def __init__(self, channel_id: int, user_id: int):
         super().__init__(timeout=60)
@@ -149,7 +193,6 @@ class ConfirmCloseView(View):
             return
         await interaction.response.edit_message(content="✅ Закрытие отменено.", view=None)
 
-# --- VIEW ДЛЯ ТИКЕТА ---
 class TicketView(View):
     def __init__(self, ticket_owner_id: int):
         super().__init__(timeout=None)
@@ -207,7 +250,6 @@ class TicketView(View):
             if not interaction.response.is_done():
                 await interaction.response.send_message("❌ Произошла ошибка. Попробуйте позже.", ephemeral=True)
 
-# --- SELECT MENU ДЛЯ ВЫБОРА КАТЕГОРИИ ---
 class TicketCategorySelect(Select):
     def __init__(self, user: discord.Member):
         options = [
@@ -242,17 +284,14 @@ class TicketCategorySelect(Select):
         try:
             user = self.user
             
-            # Формирование имени канала
             base_name = user.name.lower().replace(' ', '-').replace('_', '-')
             sanitized_name = ''.join(c for c in base_name if c.isalnum() or c == '-')
             channel_name = f"ticket-{sanitized_name}"
             
-            # Проверка на дубликаты
             existing_channels = [ch for ch in interaction.guild.channels if ch.name == channel_name and ch.category_id == TICKET_CATEGORY_ID]
             if existing_channels:
                 channel_name = f"{channel_name}-{user.discriminator}"
             
-            # Проверка: есть ли уже открытый тикет
             for channel in interaction.guild.channels:
                 if channel.name.startswith(f"ticket-{sanitized_name}") and channel.category_id == TICKET_CATEGORY_ID:
                     await interaction.response.send_message(
@@ -261,7 +300,6 @@ class TicketCategorySelect(Select):
                     )
                     return
             
-            # Настройка прав доступа
             overwrites = {
                 interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
                 user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
@@ -285,7 +323,6 @@ class TicketCategorySelect(Select):
                 reason=f"Тикет: {user.name} — {config['label']}"
             )
             
-            # Приветственное сообщение в тикете
             embed = discord.Embed(
                 title=f"{config['emoji']} {config['label']}",
                 description=(
@@ -304,13 +341,11 @@ class TicketCategorySelect(Select):
             embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
             embed.set_footer(text="🤖 AI кардинал | Система поддержки")
             
-            # Создаём View с ID владельца для проверки прав
             view = TicketView(user.id)
             
             await new_channel.send(embed=embed, view=view)
             await new_channel.send(f"🔔 На связи: {user.mention}")
             
-            # Лог создания
             await send_log(
                 bot, "🎫 Тикет создан",
                 f"{user.mention} создал тикет: {config['label']}",
@@ -332,7 +367,6 @@ class TicketCategorySelect(Select):
             if not interaction.response.is_done():
                 await interaction.response.send_message("❌ Произошла ошибка при создании тикета.", ephemeral=True)
 
-# --- КНОПКА: СОЗДАТЬ ОБРАЩЕНИЕ ---
 class CreateTicketButton(Button):
     def __init__(self):
         super().__init__(
@@ -360,17 +394,16 @@ class CreateTicketButton(Button):
             if not interaction.response.is_done():
                 await interaction.response.send_message("❌ Произошла ошибка. Попробуйте позже.", ephemeral=True)
 
-# --- VIEW ДЛЯ ПАНЕЛИ ТИКЕТОВ ---
 class TicketPanelView(View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(CreateTicketButton())
 
-# --- КОМАНДА: !tickets ---
 @bot.command()
 @commands.has_permissions(manage_channels=True)
 async def tickets(ctx):
     """Создает панель управления тикетами"""
+    await delete_command_message(ctx)
     
     categories_text = "\n\n".join([
         f"**{config['emoji']} {config['label']}**\n{config['description']}"
@@ -392,10 +425,172 @@ async def tickets(ctx):
         timestamp=datetime.now(timezone.utc)
     )
     embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
-    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v5.1")
+    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v6.0")
     
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
+
+# ============================================
+# ⚙️ SLASH КОМАНДЫ АДМИНИСТРАЦИИ
+# ============================================
+
+@tree.command(name="mute", description="Заглушить пользователя на указанное время")
+@describe(member="Пользователь для мута")
+@describe(duration="Длительность в минутах (например: 60)")
+@describe(reason="Причина мута")
+async def slash_mute(interaction: discord.Interaction, member: discord.Member, duration: int, reason: str = "Нарушение правил"):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("⚠️ Недостаточно прав.", ephemeral=True)
+        return
+    
+    mute_role = discord.Object(id=MUTE_ROLE_ID)
+    await member.add_roles(mute_role, reason=f"Moderator: {reason}")
+    
+    # Записываем мут
+    end_time = datetime.now(timezone.utc) + timedelta(minutes=duration)
+    mutes[member.id] = {
+        "end_time": end_time,
+        "guild_id": interaction.guild.id,
+        "duration": f"{duration} мин."
+    }
+    
+    await send_log(
+        bot, "🔇 Пользователь заглушен",
+        f"{member.mention} получил мут от {interaction.user.mention}.",
+        0xFF6B6B,
+        [
+            {"name": "👤 Пользователь", "value": f"`{member.name}`", "inline": True},
+            {"name": "👮 Модератор", "value": f"`{interaction.user.name}`", "inline": True},
+            {"name": "📋 Причина", "value": f"`{reason}`", "inline": True},
+            {"name": "⏱️ Длительность", "value": f"`{duration} мин.`", "inline": True}
+        ]
+    )
+    
+    await interaction.response.send_message(f"✅ {member.mention} заглушен на {duration} мин. Причина: {reason}")
+    await delete_command_message_from_interaction(interaction)
+
+@tree.command(name="unmute", description="Разглушить пользователя")
+@describe(member="Пользователь для размута")
+async def slash_unmute(interaction: discord.Interaction, member: discord.Member):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("⚠️ Недостаточно прав.", ephemeral=True)
+        return
+    
+    mute_role = discord.utils.get(interaction.guild.roles, id=MUTE_ROLE_ID)
+    if mute_role in member.roles:
+        await member.remove_roles(mute_role, reason=f"Moderator: {interaction.user.name}")
+        
+        # Удаляем из списка мутов
+        if member.id in mutes:
+            mutes.pop(member.id)
+        
+        await send_log(
+            bot, "🔊 Пользователь разглушен",
+            f"{member.mention} разглушен пользователем {interaction.user.mention}.",
+            0x2ECC71,
+            [
+                {"name": "👤 Пользователь", "value": f"`{member.name}`", "inline": True},
+                {"name": "👮 Модератор", "value": f"`{interaction.user.name}`", "inline": True}
+            ]
+        )
+        await interaction.response.send_message(f"✅ {member.mention} разглушен.")
+    else:
+        await interaction.response.send_message("⚠️ У пользователя нет роли мута.", ephemeral=True)
+    
+    await delete_command_message_from_interaction(interaction)
+
+@tree.command(name="warn", description="Выдать предупреждение пользователю")
+@describe(member="Пользователь для предупреждения")
+@describe(reason="Причина предупреждения")
+async def slash_warn(interaction: discord.Interaction, member: discord.Member, reason: str = "Нарушение правил"):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("⚠️ Недостаточно прав.", ephemeral=True)
+        return
+    
+    warns[member.id] += 1
+    await send_log(
+        bot, "⚠️ Пользователь предупреждён",
+        f"{member.mention} получил предупреждение от {interaction.user.mention}.",
+        0xFFA500,
+        [
+            {"name": "👤 Пользователь", "value": f"`{member.name}`", "inline": True},
+            {"name": "👮 Модератор", "value": f"`{interaction.user.name}`", "inline": True},
+            {"name": "📋 Причина", "value": f"`{reason}`", "inline": False},
+            {"name": "⚠️ Предупреждений", "value": f"`{warns[member.id]}`", "inline": True}
+        ]
+    )
+    await interaction.response.send_message(f"⚠️ {member.mention} предупреждён. Причина: {reason}\nВсего предупреждений: {warns[member.id]}/3")
+    
+    if warns[member.id] >= 3:
+        mute_role = discord.Object(id=MUTE_ROLE_ID)
+        await member.add_roles(mute_role, reason="3 предупреждения")
+        warns[member.id] = 0
+        await interaction.followup.send(f"🔇 {member.mention} получил мут за 3 предупреждения.")
+    
+    await delete_command_message_from_interaction(interaction)
+
+@tree.command(name="warns", description="Проверить предупреждения пользователя")
+@describe(member="Пользователь для проверки")
+async def slash_warns(interaction: discord.Interaction, member: discord.Member):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("⚠️ Недостаточно прав.", ephemeral=True)
+        return
+    
+    await interaction.response.send_message(f"📋 У {member.mention} **{warns[member.id]}** предупреждений из 3.")
+    await delete_command_message_from_interaction(interaction)
+
+@tree.command(name="raidmode", description="Включить/выключить режим защиты от рейдов")
+@describe(status="on - включить, off - выключить")
+async def slash_raidmode(interaction: discord.Interaction, status: str):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("⚠️ Недостаточно прав.", ephemeral=True)
+        return
+    
+    if status.lower() in ["on", "вкл", "true"]:
+        AUTO_MOD_CONFIG["raid_threshold"] = 3
+        await interaction.response.send_message("🚨 Режим защиты от рейдов: **ВКЛЮЧЕН**")
+        await send_log(bot, "🚨 Режим защиты от рейдов", "Активирован администратором.", 0xFF0000)
+    else:
+        AUTO_MOD_CONFIG["raid_threshold"] = 10
+        await interaction.response.send_message("✅ Режим защиты от рейдов: **ВЫКЛЮЧЕН**")
+        await send_log(bot, "🚨 Режим защиты от рейдов", "Деактивирован администратором.", 0x2ECC71)
+    
+    await delete_command_message_from_interaction(interaction)
+
+@tree.command(name="clear", description="Очистить сообщения в канале")
+@describe(amount="Количество сообщений для удаления (1-100)")
+async def slash_clear(interaction: discord.Interaction, amount: int):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("⚠️ Недостаточно прав.", ephemeral=True)
+        return
+    
+    if amount < 1 or amount > 100:
+        await interaction.response.send_message("⚠️ Количество должно быть от 1 до 100.", ephemeral=True)
+        return
+    
+    deleted = await interaction.channel.purge(limit=amount)
+    await interaction.response.send_message(f"🗑️ Удалено {len(deleted)} сообщений.", ephemeral=True)
+    
+    await send_log(
+        bot, "🗑️ Сообщения очищены",
+        f"{interaction.user.mention} очистил {len(deleted)} сообщений в {interaction.channel.mention}.",
+        0xFF6B6B,
+        [
+            {"name": "👮 Модератор", "value": f"`{interaction.user.name}`", "inline": True},
+            {"name": "📊 Удалено", "value": f"`{len(deleted)}`", "inline": True}
+        ]
+    )
+
+def delete_command_message_from_interaction(interaction: discord.Interaction):
+    """Удаляет сообщение с slash командой"""
+    asyncio.create_task(_delete_interaction_message(interaction))
+
+async def _delete_interaction_message(interaction: discord.Interaction):
+    try:
+        await asyncio.sleep(5)  # Ждём 5 секунд перед удалением
+        await interaction.original_response().delete()
+    except:
+        pass
 
 # ============================================
 # 🛡️ СИСТЕМА АВТО-МОДЕРАЦИИ
@@ -453,7 +648,6 @@ async def on_message(message):
     
     await bot.process_commands(message)
 
-# --- ФУНКЦИЯ: МУТ ПОЛЬЗОВАТЕЛЯ ---
 async def mute_user(member, reason, channel=None):
     try:
         mute_role = discord.Object(id=MUTE_ROLE_ID)
@@ -562,15 +756,14 @@ async def on_member_join(member):
                     f"**ID системы:** `{member.id}`\n"
                     f"**Статус:** Синхронизация завершена\n\n"
                     f"Добро пожаловать в **GTA 5 NeuroAI RolePlay**.\n"
-                    f"Вам автоматически выдана роль доступа к системе.\n\n"
-                    f"⚠️ Внимание: нарушение протоколов приведет к блокировке доступа."
+                    f"Вам автоматически выдана роль доступа к системе."
                 ),
                 color=0x9D00FF,
                 timestamp=datetime.now(timezone.utc)
             )
             embed.add_field(
                 name="📜 Ознакомление с протоколами",
-                value=f"Внимательно изучите правила в канале <#{RULES_CHANNEL_ID}>",
+                value=f"Внимательно изучите правила в канале <#{RULES_CHANNEL_ID}>\n\n⚠️ **Внимание:** нарушение протоколов приведет к блокировке доступа.",
                 inline=False
             )
             embed.set_footer(text="🤖 AI кардинал | NeuroAI system v1.0")
@@ -614,105 +807,6 @@ async def on_member_remove(member):
     )
 
 # ============================================
-# ⚙️ АДМИН-КОМАНДЫ
-# ============================================
-
-@bot.command()
-@commands.has_permissions(manage_roles=True)
-async def mute(ctx, member: discord.Member, *, reason: str = "Нарушение правил"):
-    if not is_admin(ctx.author):
-        await ctx.send("⚠️ Недостаточно прав.", ephemeral=True)
-        return
-    
-    mute_role = discord.Object(id=MUTE_ROLE_ID)
-    await member.add_roles(mute_role, reason=f"Moderator: {reason}")
-    
-    await send_log(
-        bot, "🔇 Пользователь заглушен",
-        f"{member.mention} получил мут от {ctx.author.mention}.",
-        0xFF6B6B,
-        [
-            {"name": "👤 Пользователь", "value": f"`{member.name}`", "inline": True},
-            {"name": "👮 Модератор", "value": f"`{ctx.author.name}`", "inline": True},
-            {"name": "📋 Причина", "value": f"`{reason}`", "inline": False}
-        ]
-    )
-    await ctx.send(f"✅ {member.mention} заглушен. Причина: {reason}")
-
-@bot.command()
-@commands.has_permissions(manage_roles=True)
-async def unmute(ctx, member: discord.Member):
-    if not is_admin(ctx.author):
-        await ctx.send("⚠️ Недостаточно прав.", ephemeral=True)
-        return
-    
-    mute_role = discord.utils.get(ctx.guild.roles, id=MUTE_ROLE_ID)
-    if mute_role in member.roles:
-        await member.remove_roles(mute_role, reason=f"Moderator: {ctx.author.name}")
-        await send_log(
-            bot, "🔊 Пользователь разглушен",
-            f"{member.mention} разглушен пользователем {ctx.author.mention}.",
-            0x2ECC71,
-            [
-                {"name": "👤 Пользователь", "value": f"`{member.name}`", "inline": True},
-                {"name": "👮 Модератор", "value": f"`{ctx.author.name}`", "inline": True}
-            ]
-        )
-        await ctx.send(f"✅ {member.mention} разглушен.")
-    else:
-        await ctx.send("⚠️ У пользователя нет роли мута.")
-
-@bot.command()
-@commands.has_permissions(manage_roles=True)
-async def warn(ctx, member: discord.Member, *, reason: str = "Нарушение правил"):
-    if not is_admin(ctx.author):
-        await ctx.send("⚠️ Недостаточно прав.", ephemeral=True)
-        return
-    
-    warns[member.id] += 1
-    await send_log(
-        bot, "⚠️ Пользователь предупреждён",
-        f"{member.mention} получил предупреждение от {ctx.author.mention}.",
-        0xFFA500,
-        [
-            {"name": "👤 Пользователь", "value": f"`{member.name}`", "inline": True},
-            {"name": "👮 Модератор", "value": f"`{ctx.author.name}`", "inline": True},
-            {"name": "📋 Причина", "value": f"`{reason}`", "inline": False},
-            {"name": "⚠️ Предупреждений", "value": f"`{warns[member.id]}`", "inline": True}
-        ]
-    )
-    await ctx.send(f"⚠️ {member.mention} предупреждён. Причина: {reason}\nВсего предупреждений: {warns[member.id]}/3")
-    
-    if warns[member.id] >= 3:
-        await mute(ctx, member, reason="3 предупреждения")
-        warns[member.id] = 0
-
-@bot.command()
-@commands.has_permissions(manage_roles=True)
-async def warns(ctx, member: discord.Member):
-    if not is_admin(ctx.author):
-        await ctx.send("⚠️ Недостаточно прав.", ephemeral=True)
-        return
-    
-    await ctx.send(f"📋 У {member.mention} **{warns[member.id]}** предупреждений из 3.")
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def raidmode(ctx, status: str):
-    if not is_admin(ctx.author):
-        await ctx.send("⚠️ Недостаточно прав.", ephemeral=True)
-        return
-    
-    if status.lower() in ["on", "вкл", "true"]:
-        AUTO_MOD_CONFIG["raid_threshold"] = 3
-        await ctx.send("🚨 Режим защиты от рейдов: **ВКЛЮЧЕН**")
-        await send_log(bot, "🚨 Режим защиты от рейдов", "Активирован администратором.", 0xFF0000)
-    else:
-        AUTO_MOD_CONFIG["raid_threshold"] = 10
-        await ctx.send("✅ Режим защиты от рейдов: **ВЫКЛЮЧЕН**")
-        await send_log(bot, "🚨 Режим защиты от рейдов", "Деактивирован администратором.", 0x2ECC71)
-
-# ============================================
 # 🟢 СОБЫТИЯ БОТА
 # ============================================
 
@@ -720,6 +814,16 @@ async def raidmode(ctx, status: str):
 async def on_ready():
     # Регистрация persistent views
     bot.add_view(TicketPanelView())
+    
+    # Синхронизация slash команд
+    try:
+        await tree.sync()
+        print(f"✅ Slash команды синхронизированы")
+    except Exception as e:
+        print(f"⚠️ Ошибка синхронизации команд: {e}")
+    
+    # Запуск проверки мутов
+    check_mutes_task.start()
     
     await bot.change_presence(
         status=discord.Status.dnd,
@@ -732,12 +836,26 @@ async def on_ready():
     print(f"🔇 Роль мута: {MUTE_ROLE_ID}")
     print(f"👋 Канал приветствий: {WELCOME_CHANNEL_ID}")
     print(f"🎭 Авто-роль: {AUTO_ROLE_ID}")
+    print(f"⚙️ Slash команды: активны")
     print("-" * 30)
     await send_log(bot, "🟢 Система запущена", "**AI кардинал** подключился.", 0x2ECC71, [
         {"name": "📡 Статус", "value": "`Онлайн (DND)`", "inline": True},
         {"name": "🎫 Тикеты", "value": "`Активны`", "inline": True},
-        {"name": "🛡️ Авто-мод", "value": "`Активен`", "inline": True}
+        {"name": "🛡️ Авто-мод", "value": "`Активен`", "inline": True},
+        {"name": "⚙️ Команды", "value": "`Slash (/)`", "inline": True}
     ])
+
+# ============================================
+# ⏱️ ЗАДАЧА ПРОВЕРКИ МУТОВ
+# ============================================
+
+@tasks.loop(minutes=1)
+async def check_mutes_task():
+    await check_mutes()
+
+@check_mutes_task.before_loop
+async def before_check_mutes_task():
+    await bot.wait_until_ready()
 
 # ============================================
 # 🚀 ЗАПУСК
