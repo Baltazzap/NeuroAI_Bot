@@ -1,9 +1,9 @@
 import os
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord.ui import Button, View, Select, button
 from dotenv import load_dotenv
-from datetime import datetime, timedelta, timezone  # ✅ Добавлено timezone
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 import re
 
@@ -108,36 +108,104 @@ async def send_log(bot, title, description, color, fields=None, thumbnail=None):
 def is_admin(member):
     return any(role.id in ADMIN_ROLE_IDS for role in member.roles) or member.id == BOT_OWNER_ID
 
+# ============================================
+# 🎫 СИСТЕМА ТИКЕТОВ (ИСПРАВЛЕНА)
+# ============================================
+
 # --- КНОПКА ПОДТВЕРЖДЕНИЯ ЗАКРЫТИЯ ---
 class ConfirmCloseView(View):
-    def __init__(self, channel: discord.TextChannel, user: discord.Member):
+    def __init__(self, channel_id: int, user_id: int):
         super().__init__(timeout=60)
-        self.channel = channel
-        self.user = user
+        self.channel_id = channel_id
+        self.user_id = user_id
     
     @button(style=discord.ButtonStyle.success, label="Да, закрыть", emoji="✅", custom_id="confirm_close_btn")
     async def confirm_btn(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id != self.user.id:
+        if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ Не ваше действие.", ephemeral=True)
             return
+        
+        channel = bot.get_channel(self.channel_id)
+        if channel is None:
+            await interaction.response.send_message("❌ Канал не найден.", ephemeral=True)
+            return
+        
         await send_log(
             bot, "🔒 Тикет закрыт",
-            f"{self.channel.mention} закрыт пользователем {self.user.mention}",
+            f"{channel.mention} закрыт пользователем {interaction.user.mention}",
             0x2ECC71,
             [
-                {"name": "📋 Канал", "value": f"`{self.channel.name}`", "inline": True},
-                {"name": "👤 Закрыл", "value": f"`{self.user.name}`", "inline": True}
+                {"name": "📋 Канал", "value": f"`{channel.name}`", "inline": True},
+                {"name": "👤 Закрыл", "value": f"`{interaction.user.name}`", "inline": True}
             ]
         )
         await interaction.response.defer()
-        await self.channel.delete(reason="Тикет закрыт")
+        await channel.delete(reason="Тикет закрыт")
     
     @button(style=discord.ButtonStyle.secondary, label="Отмена", emoji="❌", custom_id="cancel_close_btn")
     async def cancel_btn(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id != self.user.id:
+        if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ Не ваше действие.", ephemeral=True)
             return
         await interaction.response.edit_message(content="✅ Закрытие отменено.", view=None)
+
+# --- VIEW ДЛЯ ТИКЕТА ---
+class TicketView(View):
+    def __init__(self, ticket_owner_id: int):
+        super().__init__(timeout=None)
+        self.ticket_owner_id = ticket_owner_id
+        
+    @button(style=discord.ButtonStyle.danger, label="Закрыть тикет", emoji="🔒", custom_id="close_ticket_btn")
+    async def close_button(self, interaction: discord.Interaction, button: Button):
+        try:
+            user = interaction.user
+            channel = interaction.channel
+            
+            is_admin = any(role.id in ADMIN_ROLE_IDS for role in user.roles) or user.id == BOT_OWNER_ID
+            is_owner = user.id == self.ticket_owner_id
+            
+            if not is_admin and not is_owner:
+                await interaction.response.send_message("⚠️ Нет прав для закрытия.", ephemeral=True)
+                return
+            
+            confirm_view = ConfirmCloseView(channel.id, user.id)
+            await interaction.response.send_message("⚠️ Закрыть тикет?", view=confirm_view, ephemeral=True)
+        except Exception as e:
+            print(f"❌ Ошибка кнопки закрытия: {e}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Произошла ошибка. Попробуйте позже.", ephemeral=True)
+    
+    @button(style=discord.ButtonStyle.primary, label="Взять в работу", emoji="👨‍💼", custom_id="claim_ticket_btn")
+    async def claim_button(self, interaction: discord.Interaction, button: Button):
+        try:
+            user = interaction.user
+            if not any(role.id in ADMIN_ROLE_IDS for role in user.roles):
+                await interaction.response.send_message("⚠️ Только администрация может брать тикеты в работу.", ephemeral=True)
+                return
+            
+            embed = discord.Embed(
+                title="👨‍💼 Тикет взят в работу",
+                description=f"{user.mention} начал обработку вашего обращения.\nОжидайте ответа в этом канале.",
+                color=0x2ECC71,
+                timestamp=datetime.now(timezone.utc)
+            )
+            embed.set_footer(text="🤖 AI кардинал")
+            await interaction.channel.send(embed=embed)
+            await interaction.response.defer()
+            
+            await send_log(
+                bot, "👨‍💼 Тикет взят в работу",
+                f"{user.mention} взял в работу {interaction.channel.mention}",
+                0x2ECC71,
+                [
+                    {"name": "👤 Админ", "value": f"`{user.name}`", "inline": True},
+                    {"name": "📋 Канал", "value": f"`{interaction.channel.name}`", "inline": True}
+                ]
+            )
+        except Exception as e:
+            print(f"❌ Ошибка кнопки взятия в работу: {e}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Произошла ошибка. Попробуйте позже.", ephemeral=True)
 
 # --- SELECT MENU ДЛЯ ВЫБОРА КАТЕГОРИИ ---
 class TicketCategorySelect(Select):
@@ -161,141 +229,108 @@ class TicketCategorySelect(Select):
         self.user = user
 
     async def callback(self, interaction: discord.Interaction):
-        ticket_type = self.values[0]
-        config = TICKET_TYPES[ticket_type]
-        await self.create_ticket(interaction, ticket_type, config)
+        try:
+            ticket_type = self.values[0]
+            config = TICKET_TYPES[ticket_type]
+            await self.create_ticket(interaction, ticket_type, config)
+        except Exception as e:
+            print(f"❌ Ошибка выбора категории: {e}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Произошла ошибка при создании тикета.", ephemeral=True)
 
     async def create_ticket(self, interaction: discord.Interaction, ticket_type: str, config: dict):
-        user = self.user
-        
-        base_name = user.name.lower().replace(' ', '-').replace('_', '-')
-        sanitized_name = ''.join(c for c in base_name if c.isalnum() or c == '-')
-        channel_name = f"ticket-{sanitized_name}"
-        
-        existing_channels = [ch for ch in interaction.guild.channels if ch.name == channel_name and ch.category_id == TICKET_CATEGORY_ID]
-        if existing_channels:
-            channel_name = f"{channel_name}-{user.discriminator}"
-        
-        for channel in interaction.guild.channels:
-            if channel.name.startswith(f"ticket-{sanitized_name}") and channel.category_id == TICKET_CATEGORY_ID:
-                await interaction.response.send_message(
-                    f"⚠️ У вас уже есть открытый тикет: {channel.mention}",
-                    ephemeral=True
-                )
-                return
-        
-        overwrites = {
-            interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-            interaction.guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
-        }
-        for role_id in ADMIN_ROLE_IDS:
-            role = interaction.guild.get_role(role_id)
-            if role:
-                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-        
-        category = bot.get_channel(TICKET_CATEGORY_ID)
-        
-        if category is None:
-            await interaction.response.send_message("⚠️ Категория для тикетов не найдена!", ephemeral=True)
-            return
+        try:
+            user = self.user
             
-        new_channel = await interaction.guild.create_text_channel(
-            name=channel_name,
-            category=category,
-            overwrites=overwrites,
-            reason=f"Тикет: {user.name} — {config['label']}"
-        )
-        
-        embed = discord.Embed(
-            title=f"{config['emoji']} {config['label']}",
-            description=(
-                f"{user.mention}, ваш тикет успешно создан!\n\n"
-                f"📋 Детали обращения:\n"
-                f"• Категория: `{config['label']}`\n"
-                f"• Описание: {config['description']}\n"
-                f"• Создан: <t:{int(datetime.now(timezone.utc).timestamp())}:R>\n"
-                f"• Статус: `🟡 Ожидает ответа`\n\n"
-                f"💬 Что дальше?\n"
-                f"Опишите вашу ситуацию максимально подробно. Администрация ответит в ближайшее время."
-            ),
-            color=config["color"],
-            timestamp=datetime.now(timezone.utc)
-        )
-        embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
-        embed.set_footer(text="🤖 AI кардинал | Система поддержки")
-        
-        owner_username = channel_name.replace('ticket-', '').split('-')[0] if '-' in channel_name else channel_name.replace('ticket-', '')
-        view = TicketView(owner_username)
-        
-        await new_channel.send(embed=embed, view=view)
-        await new_channel.send(f"🔔 На связи: {user.mention}")
-        
-        await send_log(
-            bot, "🎫 Тикет создан",
-            f"{user.mention} создал тикет: {config['label']}",
-            config["color"],
-            [
-                {"name": "📋 Категория", "value": f"`{config['label']}`", "inline": True},
-                {"name": "🆔 Канал", "value": f"{new_channel.mention} (`{channel_name}`)", "inline": True},
-                {"name": "👤 Пользователь", "value": f"`{user.name} ({user.id})`", "inline": False}
-            ],
-            user.avatar.url if user.avatar else None
-        )
-        
-        await interaction.response.send_message(
-            f"✅ Тикет создан: {new_channel.mention}\n📋 Категория: `{config['label']}`",
-            ephemeral=True
-        )
-
-# --- VIEW ДЛЯ ТИКЕТА ---
-class TicketView(View):
-    def __init__(self, owner_username: str):
-        super().__init__(timeout=None)
-        self.owner_username = owner_username
-        
-    @button(style=discord.ButtonStyle.danger, label="Закрыть тикет", emoji="🔒", custom_id="close_ticket_btn")
-    async def close_button(self, interaction: discord.Interaction, button: Button):
-        user = interaction.user
-        channel = interaction.channel
-        
-        is_admin = any(role.id in ADMIN_ROLE_IDS for role in user.roles) or user.id == BOT_OWNER_ID
-        channel_owner = channel.name.replace('ticket-', '').split('-')[0] if '-' in channel.name else channel.name.replace('ticket-', '')
-        is_owner = channel_owner.lower() == user.name.lower()
-        
-        if not is_admin and not is_owner:
-            await interaction.response.send_message("⚠️ Нет прав для закрытия.", ephemeral=True)
-            return
-        
-        confirm_view = ConfirmCloseView(channel, user)
-        await interaction.response.send_message("⚠️ Закрыть тикет?", view=confirm_view, ephemeral=True)
-    
-    @button(style=discord.ButtonStyle.primary, label="Взять в работу", emoji="👨‍💼", custom_id="claim_ticket_btn")
-    async def claim_button(self, interaction: discord.Interaction, button: Button):
-        user = interaction.user
-        if not any(role.id in ADMIN_ROLE_IDS for role in user.roles):
-            await interaction.response.send_message("⚠️ Только администрация может брать тикеты в работу.", ephemeral=True)
-            return
-        
-        embed = discord.Embed(
-            title="👨‍💼 Тикет взят в работу",
-            description=f"{user.mention} начал обработку вашего обращения.\nОжидайте ответа в этом канале.",
-            color=0x2ECC71,
-            timestamp=datetime.now(timezone.utc)
-        )
-        embed.set_footer(text="🤖 AI кардинал")
-        await interaction.channel.send(embed=embed)
-        await interaction.response.defer()
-        
-        await send_log(
-            bot, "👨‍💼 Тикет взят в работу",
-            f"{user.mention} взял в работу {interaction.channel.mention}",
-            0x2ECC71,
-            [
-                {"name": "👤 Админ", "value": f"`{user.name}`", "inline": True},
-                {"name": "📋 Канал", "value": f"`{interaction.channel.name}`", "inline": True}
-            ]
-        )
+            # Формирование имени канала
+            base_name = user.name.lower().replace(' ', '-').replace('_', '-')
+            sanitized_name = ''.join(c for c in base_name if c.isalnum() or c == '-')
+            channel_name = f"ticket-{sanitized_name}"
+            
+            # Проверка на дубликаты
+            existing_channels = [ch for ch in interaction.guild.channels if ch.name == channel_name and ch.category_id == TICKET_CATEGORY_ID]
+            if existing_channels:
+                channel_name = f"{channel_name}-{user.discriminator}"
+            
+            # Проверка: есть ли уже открытый тикет
+            for channel in interaction.guild.channels:
+                if channel.name.startswith(f"ticket-{sanitized_name}") and channel.category_id == TICKET_CATEGORY_ID:
+                    await interaction.response.send_message(
+                        f"⚠️ У вас уже есть открытый тикет: {channel.mention}",
+                        ephemeral=True
+                    )
+                    return
+            
+            # Настройка прав доступа
+            overwrites = {
+                interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+                interaction.guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
+            }
+            for role_id in ADMIN_ROLE_IDS:
+                role = interaction.guild.get_role(role_id)
+                if role:
+                    overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+            
+            category = bot.get_channel(TICKET_CATEGORY_ID)
+            
+            if category is None:
+                await interaction.response.send_message("⚠️ Категория для тикетов не найдена!", ephemeral=True)
+                return
+                
+            new_channel = await interaction.guild.create_text_channel(
+                name=channel_name,
+                category=category,
+                overwrites=overwrites,
+                reason=f"Тикет: {user.name} — {config['label']}"
+            )
+            
+            # Приветственное сообщение в тикете
+            embed = discord.Embed(
+                title=f"{config['emoji']} {config['label']}",
+                description=(
+                    f"{user.mention}, ваш тикет успешно создан!\n\n"
+                    f"📋 Детали обращения:\n"
+                    f"• Категория: `{config['label']}`\n"
+                    f"• Описание: {config['description']}\n"
+                    f"• Создан: <t:{int(datetime.now(timezone.utc).timestamp())}:R>\n"
+                    f"• Статус: `🟡 Ожидает ответа`\n\n"
+                    f"💬 Что дальше?\n"
+                    f"Опишите вашу ситуацию максимально подробно. Администрация ответит в ближайшее время."
+                ),
+                color=config["color"],
+                timestamp=datetime.now(timezone.utc)
+            )
+            embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
+            embed.set_footer(text="🤖 AI кардинал | Система поддержки")
+            
+            # Создаём View с ID владельца для проверки прав
+            view = TicketView(user.id)
+            
+            await new_channel.send(embed=embed, view=view)
+            await new_channel.send(f"🔔 На связи: {user.mention}")
+            
+            # Лог создания
+            await send_log(
+                bot, "🎫 Тикет создан",
+                f"{user.mention} создал тикет: {config['label']}",
+                config["color"],
+                [
+                    {"name": "📋 Категория", "value": f"`{config['label']}`", "inline": True},
+                    {"name": "🆔 Канал", "value": f"{new_channel.mention} (`{channel_name}`)", "inline": True},
+                    {"name": "👤 Пользователь", "value": f"`{user.name} ({user.id})`", "inline": False}
+                ],
+                user.avatar.url if user.avatar else None
+            )
+            
+            await interaction.response.send_message(
+                f"✅ Тикет создан: {new_channel.mention}\n📋 Категория: `{config['label']}`",
+                ephemeral=True
+            )
+        except Exception as e:
+            print(f"❌ Ошибка создания тикета: {e}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Произошла ошибка при создании тикета.", ephemeral=True)
 
 # --- КНОПКА: СОЗДАТЬ ОБРАЩЕНИЕ ---
 class CreateTicketButton(Button):
@@ -308,17 +343,22 @@ class CreateTicketButton(Button):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        embed = discord.Embed(
-            title="📋 Выбор категории",
-            description="Выберите тип вашего обращения из списка ниже:",
-            color=0x9D00FF
-        )
-        embed.set_footer(text="🤖 AI кардинал")
-        
-        view = View(timeout=180)
-        view.add_item(TicketCategorySelect(interaction.user))
-        
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        try:
+            embed = discord.Embed(
+                title="📋 Выбор категории",
+                description="Выберите тип вашего обращения из списка ниже:",
+                color=0x9D00FF
+            )
+            embed.set_footer(text="🤖 AI кардинал")
+            
+            view = View(timeout=180)
+            view.add_item(TicketCategorySelect(interaction.user))
+            
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        except Exception as e:
+            print(f"❌ Ошибка кнопки создания тикета: {e}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Произошла ошибка. Попробуйте позже.", ephemeral=True)
 
 # --- VIEW ДЛЯ ПАНЕЛИ ТИКЕТОВ ---
 class TicketPanelView(View):
@@ -352,7 +392,7 @@ async def tickets(ctx):
         timestamp=datetime.now(timezone.utc)
     )
     embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
-    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v5.0")
+    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v5.1")
     
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
@@ -452,13 +492,11 @@ async def mute_user(member, reason, channel=None):
 
 @bot.event
 async def on_member_join(member):
-    """Обработка нового участника — приветствие + авто-роль + анти-рейд"""
-    now = datetime.now(timezone.utc)  # ✅ Исправлено: используем timezone.utc
+    """Обработка нового участника"""
+    now = datetime.now(timezone.utc)
     
-    # Добавляем в очередь для анти-рейда
     join_cooldown.append((member, now))
     
-    # Удаляем старые записи
     while join_cooldown and now - join_cooldown[0][1] > timedelta(seconds=AUTO_MOD_CONFIG["raid_time_window"]):
         join_cooldown.popleft()
     
@@ -493,17 +531,15 @@ async def on_member_join(member):
         join_cooldown.clear()
         return
     
-    # ✅ ДЛЯ ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ — ВЫПОЛНЯЕМ ВСЁ ПО ПОРЯДКУ
-    
-    # 1. Проверка на новый аккаунт
-    account_age = (now - member.created_at).days  # ✅ Теперь работает корректно
+    # Проверка на новый аккаунт
+    account_age = (now - member.created_at).days
     if account_age < AUTO_MOD_CONFIG["new_account_threshold"]:
         try:
             await mute_user(member, f"Новый аккаунт ({account_age} дн.)")
         except Exception as e:
             print(f"⚠️ Ошибка при муте нового аккаунта: {e}")
     
-    # 2. Авто-выдача роли
+    # Авто-выдача роли
     try:
         guild = member.guild
         auto_role = guild.get_role(AUTO_ROLE_ID)
@@ -514,17 +550,8 @@ async def on_member_join(member):
             print(f"⚠️ Роль {AUTO_ROLE_ID} не найдена на сервере")
     except Exception as e:
         print(f"❌ Ошибка выдачи авто-роли: {e}")
-        await send_log(
-            bot, "❌ Ошибка авто-роли",
-            f"Не удалось выдать роль {AUTO_ROLE_ID} пользователю {member.mention}",
-            0xFF0000,
-            [
-                {"name": "👤 Пользователь", "value": f"`{member.name}`", "inline": True},
-                {"name": "❌ Ошибка", "value": f"`{str(e)}`", "inline": False}
-            ]
-        )
     
-    # 3. Приветственное сообщение
+    # Приветственное сообщение
     try:
         channel = bot.get_channel(WELCOME_CHANNEL_ID)
         if channel:
@@ -555,7 +582,7 @@ async def on_member_join(member):
     except Exception as e:
         print(f"❌ Ошибка отправки приветствия: {e}")
     
-    # 4. Лог входа
+    # Лог входа
     try:
         await send_log(
             bot, "👤 Новый пользователь",
@@ -593,7 +620,6 @@ async def on_member_remove(member):
 @bot.command()
 @commands.has_permissions(manage_roles=True)
 async def mute(ctx, member: discord.Member, *, reason: str = "Нарушение правил"):
-    """Заглушить пользователя"""
     if not is_admin(ctx.author):
         await ctx.send("⚠️ Недостаточно прав.", ephemeral=True)
         return
@@ -616,7 +642,6 @@ async def mute(ctx, member: discord.Member, *, reason: str = "Нарушение
 @bot.command()
 @commands.has_permissions(manage_roles=True)
 async def unmute(ctx, member: discord.Member):
-    """Разглушить пользователя"""
     if not is_admin(ctx.author):
         await ctx.send("⚠️ Недостаточно прав.", ephemeral=True)
         return
@@ -640,7 +665,6 @@ async def unmute(ctx, member: discord.Member):
 @bot.command()
 @commands.has_permissions(manage_roles=True)
 async def warn(ctx, member: discord.Member, *, reason: str = "Нарушение правил"):
-    """Выдать предупреждение"""
     if not is_admin(ctx.author):
         await ctx.send("⚠️ Недостаточно прав.", ephemeral=True)
         return
@@ -666,7 +690,6 @@ async def warn(ctx, member: discord.Member, *, reason: str = "Нарушение
 @bot.command()
 @commands.has_permissions(manage_roles=True)
 async def warns(ctx, member: discord.Member):
-    """Проверить предупреждения пользователя"""
     if not is_admin(ctx.author):
         await ctx.send("⚠️ Недостаточно прав.", ephemeral=True)
         return
@@ -676,7 +699,6 @@ async def warns(ctx, member: discord.Member):
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def raidmode(ctx, status: str):
-    """Включить/выключить режим защиты от рейдов"""
     if not is_admin(ctx.author):
         await ctx.send("⚠️ Недостаточно прав.", ephemeral=True)
         return
@@ -696,6 +718,7 @@ async def raidmode(ctx, status: str):
 
 @bot.event
 async def on_ready():
+    # Регистрация persistent views
     bot.add_view(TicketPanelView())
     
     await bot.change_presence(
