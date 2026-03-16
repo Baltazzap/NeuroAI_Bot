@@ -3,7 +3,7 @@ import discord
 from discord.ext import commands, tasks
 from discord.ui import Button, View, Select, button
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone  # ✅ Добавлено timezone
 from collections import defaultdict, deque
 import re
 
@@ -16,7 +16,7 @@ if not TOKEN:
     exit()
 
 # --- НАСТРОЙКИ ИНТЕНТОВ ---
-intents = discord.Intents.all()  # ✅ Используем all() для гарантии
+intents = discord.Intents.all()
 intents.message_content = True
 
 # --- ИНИЦИАЛИЗАЦИЯ БОТА ---
@@ -93,7 +93,7 @@ async def send_log(bot, title, description, color, fields=None, thumbnail=None):
         logs_channel = bot.get_channel(LOGS_CHANNEL_ID)
         if logs_channel is None:
             return
-        embed = discord.Embed(title=title, description=description, color=color, timestamp=datetime.utcnow())
+        embed = discord.Embed(title=title, description=description, color=color, timestamp=datetime.now(timezone.utc))
         if fields:
             for field in fields:
                 embed.add_field(**field)
@@ -214,13 +214,13 @@ class TicketCategorySelect(Select):
                 f"📋 Детали обращения:\n"
                 f"• Категория: `{config['label']}`\n"
                 f"• Описание: {config['description']}\n"
-                f"• Создан: <t:{int(datetime.utcnow().timestamp())}:R>\n"
+                f"• Создан: <t:{int(datetime.now(timezone.utc).timestamp())}:R>\n"
                 f"• Статус: `🟡 Ожидает ответа`\n\n"
                 f"💬 Что дальше?\n"
                 f"Опишите вашу ситуацию максимально подробно. Администрация ответит в ближайшее время."
             ),
             color=config["color"],
-            timestamp=datetime.utcnow()
+            timestamp=datetime.now(timezone.utc)
         )
         embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
         embed.set_footer(text="🤖 AI кардинал | Система поддержки")
@@ -281,7 +281,7 @@ class TicketView(View):
             title="👨‍💼 Тикет взят в работу",
             description=f"{user.mention} начал обработку вашего обращения.\nОжидайте ответа в этом канале.",
             color=0x2ECC71,
-            timestamp=datetime.utcnow()
+            timestamp=datetime.now(timezone.utc)
         )
         embed.set_footer(text="🤖 AI кардинал")
         await interaction.channel.send(embed=embed)
@@ -349,10 +349,10 @@ async def tickets(ctx):
             f"• 🤖 Прозрачность — статус отслеживается в реальном времени"
         ),
         color=0x9D00FF,
-        timestamp=datetime.utcnow()
+        timestamp=datetime.now(timezone.utc)
     )
     embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
-    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v4.1")
+    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v5.0")
     
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
@@ -370,7 +370,7 @@ async def on_message(message):
         await bot.process_commands(message)
         return
     
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     
     # Проверка на спам
     message_cooldown[message.author.id].append(now)
@@ -447,13 +447,13 @@ async def mute_user(member, reason, channel=None):
         print(f"⚠️ Ошибка при муте: {e}")
 
 # ============================================
-# 👤 ПРИВЕТСТВИЕ И АВТО-РОЛЬ (ИСПРАВЛЕНО)
+# 👤 ПРИВЕТСТВИЕ И АВТО-РОЛЬ
 # ============================================
 
 @bot.event
 async def on_member_join(member):
     """Обработка нового участника — приветствие + авто-роль + анти-рейд"""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)  # ✅ Исправлено: используем timezone.utc
     
     # Добавляем в очередь для анти-рейда
     join_cooldown.append((member, now))
@@ -491,19 +491,19 @@ async def on_member_join(member):
                     print(f"⚠️ Не удалось забанить: {e}")
         
         join_cooldown.clear()
-        return  # ✅ Выходим после обработки рейда
+        return
     
     # ✅ ДЛЯ ОБЫЧНЫХ ПОЛЬЗОВАТЕЛЕЙ — ВЫПОЛНЯЕМ ВСЁ ПО ПОРЯДКУ
     
     # 1. Проверка на новый аккаунт
-    account_age = (now - member.created_at).days
+    account_age = (now - member.created_at).days  # ✅ Теперь работает корректно
     if account_age < AUTO_MOD_CONFIG["new_account_threshold"]:
         try:
             await mute_user(member, f"Новый аккаунт ({account_age} дн.)")
         except Exception as e:
             print(f"⚠️ Ошибка при муте нового аккаунта: {e}")
     
-    # 2. Авто-выдача роли (ОБЯЗАТЕЛЬНО В TRY-EXCEPT)
+    # 2. Авто-выдача роли
     try:
         guild = member.guild
         auto_role = guild.get_role(AUTO_ROLE_ID)
@@ -539,7 +539,7 @@ async def on_member_join(member):
                     f"⚠️ Внимание: нарушение протоколов приведет к блокировке доступа."
                 ),
                 color=0x9D00FF,
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
             embed.add_field(
                 name="📜 Ознакомление с протоколами",
@@ -690,7 +690,10 @@ async def raidmode(ctx, status: str):
         await ctx.send("✅ Режим защиты от рейдов: **ВЫКЛЮЧЕН**")
         await send_log(bot, "🚨 Режим защиты от рейдов", "Деактивирован администратором.", 0x2ECC71)
 
-# --- СОБЫТИЯ БОТА ---
+# ============================================
+# 🟢 СОБЫТИЯ БОТА
+# ============================================
+
 @bot.event
 async def on_ready():
     bot.add_view(TicketPanelView())
@@ -713,7 +716,10 @@ async def on_ready():
         {"name": "🛡️ Авто-мод", "value": "`Активен`", "inline": True}
     ])
 
-# --- ЗАПУСК ---
+# ============================================
+# 🚀 ЗАПУСК
+# ============================================
+
 if __name__ == "__main__":
     try:
         bot.run(TOKEN)
