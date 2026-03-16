@@ -1,7 +1,7 @@
 import os
 import discord
 from discord.ext import commands
-from discord.ui import Button, View, Select, Modal, TextInput
+from discord.ui import Button, View, Select
 from dotenv import load_dotenv
 from datetime import datetime
 
@@ -140,6 +140,10 @@ class TicketCategorySelect(Select):
         channel_name = f"ticket-{user.id}-{ticket_type}"
         category = bot.get_channel(TICKET_CATEGORY_ID)
         
+        if category is None:
+            await interaction.response.send_message("⚠️ Категория для тикетов не найдена!", ephemeral=True)
+            return
+            
         new_channel = await interaction.guild.create_text_channel(
             name=channel_name,
             category=category,
@@ -166,13 +170,8 @@ class TicketCategorySelect(Select):
         embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
         embed.set_footer(text="🤖 AI Кардинал | Система поддержки")
         
-        # Кнопки управления
-        close_btn = Button(style=discord.ButtonStyle.danger, label="🔒 Закрыть", emoji="🔒", custom_id="close_ticket")
-        claim_btn = Button(style=discord.ButtonStyle.primary, label="👨‍💼 Взять в работу", emoji="👨‍💼", custom_id="claim_ticket")
-        
-        view = View(timeout=None)
-        view.add_item(close_btn)
-        view.add_item(claim_btn)
+        # Кнопки управления (с классами для правильной обработки)
+        view = TicketView(user)
         
         await new_channel.send(embed=embed, view=view)
         await new_channel.send(f"🔔 На связи: {user.mention}")
@@ -195,56 +194,29 @@ class TicketCategorySelect(Select):
             ephemeral=True
         )
 
-# --- КНОПКА: СОЗДАТЬ ОБРАЩЕНИЕ ---
-class CreateTicketButton(Button):
-    def __init__(self):
-        super().__init__(
-            style=discord.ButtonStyle.primary,
-            label="Создать обращение",
-            emoji="🎫",
-            custom_id="create_ticket_btn"
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        # Отправляем сообщение с Select меню
-        embed = discord.Embed(
-            title="📋 ВЫБОР КАТЕГОРИИ",
-            description="Выберите тип вашего обращения из списка ниже:",
-            color=0x9D00FF
-        )
-        embed.set_footer(text="🤖 AI Кардинал")
+# --- VIEW ДЛЯ ТИКЕТА (с кнопками) ---
+class TicketView(View):
+    def __init__(self, ticket_owner: discord.Member):
+        super().__init__(timeout=None)  # Persistent view
+        self.ticket_owner = ticket_owner
         
-        view = View(timeout=180)  # 3 минуты на выбор
-        view.add_item(TicketCategorySelect(interaction.user))
-        
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-# --- КНОПКА: ЗАКРЫТИЕ ТИКЕТА ---
-class CloseTicketButton(Button):
-    def __init__(self):
-        super().__init__(style=discord.ButtonStyle.danger, label="Закрыть тикет", emoji="🔒", custom_id="close_ticket")
-
-    async def callback(self, interaction: discord.Interaction):
+    @discord.ui.button(style=discord.ButtonStyle.danger, label="Закрыть тикет", emoji="🔒", custom_id="close_ticket_btn")
+    async def close_button(self, interaction: discord.Interaction, button: Button):
         user = interaction.user
         channel = interaction.channel
         
         is_admin = any(role.id in ADMIN_ROLE_IDS for role in user.roles) or user.id == BOT_OWNER_ID
-        is_owner = channel.name.startswith(f"ticket-{user.id}-")
+        is_owner = channel.name.startswith(f"ticket-{self.ticket_owner.id}-")
         
         if not is_admin and not is_owner:
             await interaction.response.send_message("⚠️ Нет прав для закрытия.", ephemeral=True)
             return
         
-        # Подтверждение
+        # Подтверждение закрытия
         confirm_view = View(timeout=60)
-        confirm_btn = Button(style=discord.ButtonStyle.success, label="✅ Да, закрыть", custom_id="confirm_close")
-        cancel_btn = Button(style=discord.ButtonStyle.secondary, label="❌ Отмена", custom_id="cancel_close")
-        confirm_view.add_item(confirm_btn)
-        confirm_view.add_item(cancel_btn)
         
-        msg = await interaction.response.send_message("⚠️ Закрыть тикет?", view=confirm_view, ephemeral=True)
-        
-        async def confirm_callback(inter: discord.Interaction):
+        @discord.ui.button(style=discord.ButtonStyle.success, label="✅ Да, закрыть", custom_id="confirm_close_btn")
+        async def confirm_callback(inter: discord.Interaction, btn: Button):
             if inter.user.id != user.id:
                 await inter.response.send_message("❌ Не ваше действие.", ephemeral=True)
                 return
@@ -260,21 +232,20 @@ class CloseTicketButton(Button):
             await inter.response.defer()
             await channel.delete(reason="Тикет закрыт")
         
-        async def cancel_callback(inter: discord.Interaction):
+        @discord.ui.button(style=discord.ButtonStyle.secondary, label="❌ Отмена", custom_id="cancel_close_btn")
+        async def cancel_callback(inter: discord.Interaction, btn: Button):
             if inter.user.id != user.id:
                 await inter.response.send_message("❌ Не ваше действие.", ephemeral=True)
                 return
             await inter.response.edit_message(content="✅ Закрытие отменено.", view=None)
         
-        confirm_btn.callback = confirm_callback
-        cancel_btn.callback = cancel_callback
-
-# --- КНОПКА: ВЗЯТЬ В РАБОТУ ---
-class ClaimTicketButton(Button):
-    def __init__(self):
-        super().__init__(style=discord.ButtonStyle.primary, label="👨‍💼 Взять в работу", emoji="👨‍💼", custom_id="claim_ticket")
-
-    async def callback(self, interaction: discord.Interaction):
+        confirm_view.add_item(confirm_callback)
+        confirm_view.add_item(cancel_callback)
+        
+        await interaction.response.send_message("⚠️ Закрыть тикет?", view=confirm_view, ephemeral=True)
+    
+    @discord.ui.button(style=discord.ButtonStyle.primary, label="👨‍💼 Взять в работу", emoji="👨‍💼", custom_id="claim_ticket_btn")
+    async def claim_button(self, interaction: discord.Interaction, button: Button):
         user = interaction.user
         if not any(role.id in ADMIN_ROLE_IDS for role in user.roles):
             await interaction.response.send_message("⚠️ Только администрация может брать тикеты в работу.", ephemeral=True)
@@ -300,13 +271,41 @@ class ClaimTicketButton(Button):
             ]
         )
 
+# --- КНОПКА: СОЗДАТЬ ОБРАЩЕНИЕ ---
+class CreateTicketButton(Button):
+    def __init__(self):
+        super().__init__(
+            style=discord.ButtonStyle.primary,
+            label="Создать обращение",
+            emoji="🎫",
+            custom_id="create_ticket_btn"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="📋 ВЫБОР КАТЕГОРИИ",
+            description="Выберите тип вашего обращения из списка ниже:",
+            color=0x9D00FF
+        )
+        embed.set_footer(text="🤖 AI Кардинал")
+        
+        view = View(timeout=180)
+        view.add_item(TicketCategorySelect(interaction.user))
+        
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+# --- VIEW ДЛЯ ПАНЕЛИ ТИКЕТОВ ---
+class TicketPanelView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(CreateTicketButton())
+
 # --- КОМАНДА: !tickets ---
 @bot.command()
 @commands.has_permissions(manage_channels=True)
 async def tickets(ctx):
     """Создает панель управления тикетами"""
     
-    # Формируем список категорий для эмбеда
     categories_text = "\n\n".join([
         f"**{config['emoji']} {config['label']}**\n{config['description']}"
         for config in TICKET_TYPES.values()
@@ -326,43 +325,20 @@ async def tickets(ctx):
         color=0x9D00FF,
         timestamp=datetime.utcnow()
     )
-    embed.set_image(url="https://i.imgur.com/hbG3hwa.png")  # Баннер
-    embed.set_footer(text="🤖 AI Кардинал | NeuroAI Support v2.1")
+    embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
+    embed.set_footer(text="🤖 AI Кардинал | NeuroAI Support v2.2")
     
-    view = View(timeout=None)
-    view.add_item(CreateTicketButton())
+    view = TicketPanelView()
     
     await ctx.send(embed=embed, view=view)
-
-# --- ОБРАБОТЧИК КНОПОК ---
-@bot.event
-async def on_interaction(interaction: discord.Interaction):
-    custom_id = interaction.data.get("custom_id") if interaction.data else None
-    
-    if custom_id == "close_ticket":
-        await CloseTicketButton().callback(interaction)
-    elif custom_id == "claim_ticket":
-        await ClaimTicketButton().callback(interaction)
-    elif custom_id == "confirm_close":
-        channel = interaction.channel
-        user = interaction.user
-        await send_log(
-            bot, "🔒 ТИКЕТ ЗАКРЫТ",
-            f"{channel.mention} закрыт пользователем {user.mention}",
-            0x2ECC71,
-            [
-                {"name": "📋 Канал", "value": f"`{channel.name}`", "inline": True},
-                {"name": "👤 Закрыл", "value": f"`{user.name}`", "inline": True}
-            ]
-        )
-        await interaction.response.defer()
-        await channel.delete(reason="Тикет закрыт")
-    elif custom_id == "cancel_close":
-        await interaction.response.edit_message(content="✅ Закрытие отменено.", view=None)
 
 # --- СОБЫТИЯ БОТА ---
 @bot.event
 async def on_ready():
+    # Регистрация постоянных видов (persistent views)
+    bot.add_view(TicketPanelView())
+    bot.add_view(TicketView(bot.user))  # Placeholder, ticket_owner не важен для регистрации
+    
     await bot.change_presence(
         status=discord.Status.dnd,
         activity=discord.Activity(type=discord.ActivityType.watching, name="за симуляцией NeuroAI")
