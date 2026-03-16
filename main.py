@@ -10,7 +10,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 if not TOKEN:
-    print("❌ ОШИБКА: Токен не найден в переменных окружения (.env)")
+    print("❌ Ошибка: токен не найден в переменных окружения (.env)")
     exit()
 
 # --- НАСТРОЙКИ ИНТЕНТОВ ---
@@ -82,26 +82,25 @@ async def send_log(bot, title, description, color, fields=None, thumbnail=None):
                 embed.add_field(**field)
         if thumbnail:
             embed.set_thumbnail(url=thumbnail)
-        embed.set_footer(text="🤖 NeuroAI System Logs")
+        embed.set_footer(text="🤖 NeuroAI system logs")
         await logs_channel.send(embed=embed)
     except Exception as e:
         print(f"⚠️ Ошибка отправки лога: {e}")
 
 # --- КНОПКА ПОДТВЕРЖДЕНИЯ ЗАКРЫТИЯ ---
 class ConfirmCloseView(View):
-    def __init__(self, original_interaction: discord.Interaction, channel: discord.TextChannel, user: discord.Member):
+    def __init__(self, channel: discord.TextChannel, user: discord.Member):
         super().__init__(timeout=60)
-        self.original_interaction = original_interaction
         self.channel = channel
         self.user = user
     
-    @button(style=discord.ButtonStyle.success, label="✅ Да, закрыть", custom_id="confirm_close_btn")
+    @button(style=discord.ButtonStyle.success, label="Да, закрыть", emoji="✅", custom_id="confirm_close_btn")
     async def confirm_btn(self, interaction: discord.Interaction, button: Button):
         if interaction.user.id != self.user.id:
             await interaction.response.send_message("❌ Не ваше действие.", ephemeral=True)
             return
         await send_log(
-            bot, "🔒 ТИКЕТ ЗАКРЫТ",
+            bot, "🔒 Тикет закрыт",
             f"{self.channel.mention} закрыт пользователем {self.user.mention}",
             0x2ECC71,
             [
@@ -112,7 +111,7 @@ class ConfirmCloseView(View):
         await interaction.response.defer()
         await self.channel.delete(reason="Тикет закрыт")
     
-    @button(style=discord.ButtonStyle.secondary, label="❌ Отмена", custom_id="cancel_close_btn")
+    @button(style=discord.ButtonStyle.secondary, label="Отмена", emoji="❌", custom_id="cancel_close_btn")
     async def cancel_btn(self, interaction: discord.Interaction, button: Button):
         if interaction.user.id != self.user.id:
             await interaction.response.send_message("❌ Не ваше действие.", ephemeral=True)
@@ -148,17 +147,17 @@ class TicketCategorySelect(Select):
     async def create_ticket(self, interaction: discord.Interaction, ticket_type: str, config: dict):
         user = self.user
         
-        # 🔧 ФОРМИРОВАНИЕ ИМЕНИ КАНАЛА: ticket-username
+        # Формирование имени канала: ticket-username
         base_name = user.name.lower().replace(' ', '-').replace('_', '-')
         sanitized_name = ''.join(c for c in base_name if c.isalnum() or c == '-')
         channel_name = f"ticket-{sanitized_name}"
         
-        # Проверка на дубликаты (если у двух пользователей одинаковый ник)
+        # Проверка на дубликаты
         existing_channels = [ch for ch in interaction.guild.channels if ch.name == channel_name and ch.category_id == TICKET_CATEGORY_ID]
         if existing_channels:
             channel_name = f"{channel_name}-{user.discriminator}"
         
-        # Проверка: есть ли уже открытый тикет у этого пользователя
+        # Проверка: есть ли уже открытый тикет
         for channel in interaction.guild.channels:
             if channel.name.startswith(f"ticket-{sanitized_name}") and channel.category_id == TICKET_CATEGORY_ID:
                 await interaction.response.send_message(
@@ -196,27 +195,30 @@ class TicketCategorySelect(Select):
             title=f"{config['emoji']} {config['label']}",
             description=(
                 f"{user.mention}, ваш тикет успешно создан!\n\n"
-                f"📋 **Детали обращения:**\n"
+                f"📋 Детали обращения:\n"
                 f"• Категория: `{config['label']}`\n"
                 f"• Описание: {config['description']}\n"
                 f"• Создан: <t:{int(datetime.utcnow().timestamp())}:R>\n"
                 f"• Статус: `🟡 Ожидает ответа`\n\n"
-                f"💬 **Что дальше?**\n"
+                f"💬 Что дальше?\n"
                 f"Опишите вашу ситуацию максимально подробно. Администрация ответит в ближайшее время."
             ),
             color=config["color"],
             timestamp=datetime.utcnow()
         )
         embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
-        embed.set_footer(text="🤖 AI Кардинал | Система поддержки")
+        embed.set_footer(text="🤖 AI кардинал | Система поддержки")
         
-        view = TicketView(user)
+        # Извлекаем username из названия канала для проверки владельца
+        owner_username = channel_name.replace('ticket-', '').split('-')[0] if '-' in channel_name else channel_name.replace('ticket-', '')
+        view = TicketView(owner_username)
+        
         await new_channel.send(embed=embed, view=view)
         await new_channel.send(f"🔔 На связи: {user.mention}")
         
         # Лог создания
         await send_log(
-            bot, "🎫 ТИКЕТ СОЗДАН",
+            bot, "🎫 Тикет создан",
             f"{user.mention} создал тикет: {config['label']}",
             config["color"],
             [
@@ -234,9 +236,9 @@ class TicketCategorySelect(Select):
 
 # --- VIEW ДЛЯ ТИКЕТА (с кнопками) ---
 class TicketView(View):
-    def __init__(self, ticket_owner: discord.Member):
-        super().__init__(timeout=None)
-        self.ticket_owner = ticket_owner
+    def __init__(self, owner_username: str):
+        super().__init__(timeout=None)  # Persistent view - работает после перезапуска
+        self.owner_username = owner_username
         
     @button(style=discord.ButtonStyle.danger, label="Закрыть тикет", emoji="🔒", custom_id="close_ticket_btn")
     async def close_button(self, interaction: discord.Interaction, button: Button):
@@ -244,16 +246,19 @@ class TicketView(View):
         channel = interaction.channel
         
         is_admin = any(role.id in ADMIN_ROLE_IDS for role in user.roles) or user.id == BOT_OWNER_ID
-        is_owner = channel.name.startswith(f"ticket-{self.ticket_owner.name.lower().replace(' ', '-').replace('_', '-')}")
+        
+        # Проверка владельца через имя канала
+        channel_owner = channel.name.replace('ticket-', '').split('-')[0] if '-' in channel_name else channel.name.replace('ticket-', '')
+        is_owner = channel_owner.lower() == user.name.lower()
         
         if not is_admin and not is_owner:
             await interaction.response.send_message("⚠️ Нет прав для закрытия.", ephemeral=True)
             return
         
-        confirm_view = ConfirmCloseView(interaction, channel, user)
+        confirm_view = ConfirmCloseView(channel, user)
         await interaction.response.send_message("⚠️ Закрыть тикет?", view=confirm_view, ephemeral=True)
     
-    @button(style=discord.ButtonStyle.primary, label="👨‍💼 Взять в работу", emoji="👨‍💼", custom_id="claim_ticket_btn")
+    @button(style=discord.ButtonStyle.primary, label="Взять в работу", emoji="👨‍💼", custom_id="claim_ticket_btn")
     async def claim_button(self, interaction: discord.Interaction, button: Button):
         user = interaction.user
         if not any(role.id in ADMIN_ROLE_IDS for role in user.roles):
@@ -261,17 +266,17 @@ class TicketView(View):
             return
         
         embed = discord.Embed(
-            title="👨‍💼 ТИКЕТ ВЗЯТ В РАБОТУ",
+            title="👨‍💼 Тикет взят в работу",
             description=f"{user.mention} начал обработку вашего обращения.\nОжидайте ответа в этом канале.",
             color=0x2ECC71,
             timestamp=datetime.utcnow()
         )
-        embed.set_footer(text="🤖 AI Кардинал")
+        embed.set_footer(text="🤖 AI кардинал")
         await interaction.channel.send(embed=embed)
         await interaction.response.defer()
         
         await send_log(
-            bot, "👨‍💼 ТИКЕТ ВЗЯТ В РАБОТУ",
+            bot, "👨‍💼 Тикет взят в работу",
             f"{user.mention} взял в работу {interaction.channel.mention}",
             0x2ECC71,
             [
@@ -292,11 +297,11 @@ class CreateTicketButton(Button):
 
     async def callback(self, interaction: discord.Interaction):
         embed = discord.Embed(
-            title="📋 ВЫБОР КАТЕГОРИИ",
+            title="📋 Выбор категории",
             description="Выберите тип вашего обращения из списка ниже:",
             color=0x9D00FF
         )
-        embed.set_footer(text="🤖 AI Кардинал")
+        embed.set_footer(text="🤖 AI кардинал")
         
         view = View(timeout=180)
         view.add_item(TicketCategorySelect(interaction.user))
@@ -306,7 +311,7 @@ class CreateTicketButton(Button):
 # --- VIEW ДЛЯ ПАНЕЛИ ТИКЕТОВ ---
 class TicketPanelView(View):
     def __init__(self):
-        super().__init__(timeout=None)
+        super().__init__(timeout=None)  # Persistent view
         self.add_item(CreateTicketButton())
 
 # --- КОМАНДА: !tickets ---
@@ -321,12 +326,12 @@ async def tickets(ctx):
     ])
     
     embed = discord.Embed(
-        title="🎫 СИСТЕМА ПОДДЕРЖКИ NEURO_AI",
+        title="🎫 Система поддержки Neuro_AI",
         description=(
             f"Добро пожаловать в центр поддержки **GTA 5 NeuroAI RolePlay**.\n\n"
             f"Нажмите на кнопку ниже, чтобы создать обращение. Выберите категорию, и система автоматически создаст приватный канал для связи с администрацией.\n\n"
-            f"📋 **Доступные категории:**\n{categories_text}\n\n"
-            f"⚡ **Преимущества:**\n"
+            f"📋 Доступные категории:\n{categories_text}\n\n"
+            f"⚡ Преимущества:\n"
             f"• 🔒 Конфиденциальность — тикет видят только вы и администрация\n"
             f"• 📊 Быстрый ответ — среднее время: 15 минут\n"
             f"• 🤖 Прозрачность — статус отслеживается в реальном времени"
@@ -335,7 +340,7 @@ async def tickets(ctx):
         timestamp=datetime.utcnow()
     )
     embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
-    embed.set_footer(text="🤖 AI Кардинал | NeuroAI Support v3.0")
+    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v3.1")
     
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
@@ -343,19 +348,20 @@ async def tickets(ctx):
 # --- СОБЫТИЯ БОТА ---
 @bot.event
 async def on_ready():
-    # Регистрация только панели тикетов (persistent view)
+    # Регистрация persistent views - кнопки работают после перезапуска!
     bot.add_view(TicketPanelView())
     
     await bot.change_presence(
         status=discord.Status.dnd,
         activity=discord.Activity(type=discord.ActivityType.watching, name="за симуляцией NeuroAI")
     )
-    print(f"🤖 AI Кардинал подключен...")
+    print(f"🤖 AI кардинал подключен...")
     print(f"📡 {bot.user.name} | 🆔 {bot.user.id}")
-    print(f"🎫 Система тикетов: АКТИВНА")
+    print(f"🎫 Система тикетов: активна")
     print(f"📁 Формат тикетов: #ticket-username")
+    print(f"🔄 Кнопки: постоянные (persistent)")
     print("-" * 30)
-    await send_log(bot, "🟢 СИСТЕМА ЗАПУЩЕНА", "**AI Кардинал** подключился.", 0x2ECC71, [
+    await send_log(bot, "🟢 Система запущена", "**AI кардинал** подключился.", 0x2ECC71, [
         {"name": "📡 Статус", "value": "`Онлайн (DND)`", "inline": True},
         {"name": "🎫 Тикеты", "value": "`Активны`", "inline": True},
         {"name": "📁 Формат", "value": "`#ticket-username`", "inline": True}
@@ -376,30 +382,30 @@ async def on_member_join(member):
         channel = bot.get_channel(WELCOME_CHANNEL_ID)
         if channel:
             embed = discord.Embed(
-                title="📡 ОБНАРУЖЕНО НОВОЕ ПОДКЛЮЧЕНИЕ",
+                title="📡 Обнаружено новое подключение",
                 description=(
                     f"**Пользователь:** {member.mention}\n"
-                    f"**ID Системы:** `{member.id}`\n"
+                    f"**ID системы:** `{member.id}`\n"
                     f"**Статус:** Синхронизация завершена\n\n"
                     f"Добро пожаловать в **GTA 5 NeuroAI RolePlay**.\n"
                     f"Вам автоматически выдана роль доступа к системе.\n\n"
-                    f"⚠️ **ВНИМАНИЕ:** Нарушение протоколов приведет к блокировке доступа."
+                    f"⚠️ Внимание: нарушение протоколов приведет к блокировке доступа."
                 ),
                 color=0x9D00FF,
                 timestamp=datetime.utcnow()
             )
             embed.add_field(
-                name="📜 ОЗНАКОМЛЕНИЕ С ПРОТОКОЛАМИ",
+                name="📜 Ознакомление с протоколами",
                 value=f"Внимательно изучите правила в канале <#{RULES_CHANNEL_ID}>",
                 inline=False
             )
-            embed.set_footer(text="🤖 AI Кардинал | NeuroAI System v1.0")
+            embed.set_footer(text="🤖 AI кардинал | NeuroAI system v1.0")
             embed.set_thumbnail(url=member.avatar.url if member.avatar else member.default_avatar.url)
             await channel.send(embed=embed)
         
         # Лог входа
         await send_log(
-            bot, "👤 НОВЫЙ ПОЛЬЗОВАТЕЛЬ",
+            bot, "👤 Новый пользователь",
             f"{member.mention} присоединился к симуляции.",
             0x00BFFF,
             [
@@ -417,7 +423,7 @@ async def on_member_join(member):
 async def on_member_remove(member):
     """Лог выхода участника"""
     await send_log(
-        bot, "👤 ПОЛЬЗОВАТЕЛЬ ПОКИНУЛ СИСТЕМУ",
+        bot, "👤 Пользователь покинул систему",
         f"{member.mention} отключился от симуляции.",
         0xDC143C,
         [
@@ -433,6 +439,6 @@ if __name__ == "__main__":
     try:
         bot.run(TOKEN)
     except discord.LoginFailure:
-        print("❌ ОШИБКА: Неверный токен бота.")
+        print("❌ Ошибка: неверный токен бота.")
     except Exception as e:
-        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА СИСТЕМЫ: {e}")
+        print(f"❌ Критическая ошибка системы: {e}")
