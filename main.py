@@ -34,10 +34,10 @@ TICKET_CATEGORY_ID = 1482817236984008714
 BOT_OWNER_ID = 314805583788244993
 MUTE_ROLE_ID = 1482813904697692360
 
-# ✅ НОВАЯ РОЛЬ ДЛЯ ДОСТУПА К ТИКЕТАМ
+# ✅ РОЛЬ ПОДДЕРЖКИ (доступ к управлению тикетами)
 SUPPORT_ROLE_ID = 1483016729172119684
 
-# ✅ РОЛЬ ДЛЯ УПОМИНАНИЯ В ТИКЕТЕ
+# ✅ РОЛЬ ДЛЯ УПОМИНАНИЯ В НОВЫХ ТИКЕТАХ
 NOTIFY_ROLE_ID = 1482807077620678949
 
 ADMIN_ROLE_IDS = [
@@ -62,6 +62,7 @@ message_cooldown = defaultdict(lambda: deque())
 join_cooldown = deque()
 warns = defaultdict(int)
 mutes = {}
+ticket_owners = {}  # {channel_id: user_id}
 
 # --- КАТЕГОРИИ ТИКЕТОВ ---
 TICKET_TYPES = {
@@ -119,7 +120,7 @@ def is_admin(member):
     return any(role.id in ADMIN_ROLE_IDS for role in member.roles) or member.id == BOT_OWNER_ID
 
 def can_manage_tickets(member):
-    """Проверка: может ли пользователь управлять тикетами (админ + support роль + владелец)"""
+    """Проверка: может ли пользователь управлять тикетами"""
     return (
         any(role.id in ADMIN_ROLE_IDS for role in member.roles) or 
         member.id == BOT_OWNER_ID or
@@ -185,9 +186,10 @@ class ConfirmCloseView(View):
         await interaction.response.edit_message(content="✅ Закрытие отменено.", view=None)
 
 class TicketView(View):
-    def __init__(self, ticket_owner_id: int):
+    def __init__(self, ticket_owner_id: int, ticket_message_id: int = None):
         super().__init__(timeout=None)
         self.ticket_owner_id = ticket_owner_id
+        self.ticket_message_id = ticket_message_id
         
     @button(style=discord.ButtonStyle.danger, label="Закрыть тикет", emoji="🔒", custom_id="close_ticket_btn")
     async def close_button(self, interaction: discord.Interaction, button: Button):
@@ -213,11 +215,36 @@ class TicketView(View):
     async def claim_button(self, interaction: discord.Interaction, button: Button):
         try:
             user = interaction.user
-            # ✅ ПРОВЕРКА: админ ИЛИ support роль ИЛИ владелец бота
+            channel = interaction.channel
+            
             if not can_manage_tickets(user):
                 await interaction.response.send_message("⚠️ Только администрация и поддержка могут брать тикеты в работу.", ephemeral=True)
                 return
             
+            # ✅ ОБНОВЛЯЕМ СТАТУС В ЭМБЕДЕ
+            try:
+                # Находим оригинальное сообщение с эмбедом тикета
+                async for message in channel.history(limit=10):
+                    if message.author == bot.user and message.embeds and "ваш тикет успешно создан" in message.embeds[0].description:
+                        # Обновляем эмбед
+                        old_embed = message.embeds[0]
+                        new_description = old_embed.description.replace(
+                            "• Статус: `🟡 Ожидает ответа`",
+                            f"• Статус: `🟢 В работе у {user.mention}`"
+                        )
+                        new_embed = discord.Embed(
+                            title=old_embed.title,
+                            description=new_description,
+                            color=0x2ECC71,  # Зеленый цвет для статуса "В работе"
+                            timestamp=datetime.now(timezone.utc)
+                        )
+                        new_embed.set_footer(text="🤖 AI кардинал | Система поддержки")
+                        await message.edit(embed=new_embed)
+                        break
+            except Exception as e:
+                print(f"⚠️ Не удалось обновить эмбед: {e}")
+            
+            # Отправляем уведомление
             embed = discord.Embed(
                 title="👨‍💼 Тикет взят в работу",
                 description=f"{user.mention} начал обработку вашего обращения.\nОжидайте ответа в этом канале.",
@@ -225,16 +252,17 @@ class TicketView(View):
                 timestamp=datetime.now(timezone.utc)
             )
             embed.set_footer(text="🤖 AI кардинал")
-            await interaction.channel.send(embed=embed)
+            await channel.send(embed=embed)
+            
             await interaction.response.defer()
             
             await send_log(
                 bot, "👨‍💼 Тикет взят в работу",
-                f"{user.mention} взял в работу {interaction.channel.mention}",
+                f"{user.mention} взял в работу {channel.mention}",
                 0x2ECC71,
                 [
                     {"name": "👤 Сотрудник", "value": f"`{user.name}`", "inline": True},
-                    {"name": "📋 Канал", "value": f"`{interaction.channel.name}`", "inline": True}
+                    {"name": "📋 Канал", "value": f"`{channel.name}`", "inline": True}
                 ]
             )
         except Exception as e:
@@ -331,15 +359,20 @@ class TicketCategorySelect(Select):
                 color=config["color"],
                 timestamp=datetime.now(timezone.utc)
             )
-            # ❌ УДАЛЕНО: embed.set_image(url="...")
             embed.set_footer(text="🤖 AI кардинал | Система поддержки")
+            
+            # Сохраняем ID владельца тикета
+            ticket_owners[new_channel.id] = user.id
             
             view = TicketView(user.id)
             
-            # ✅ УПОМИНАНИЕ РОЛИ НАД ЭМБЕДОМ + ТЕКСТ ВНИЗУ
-            await new_channel.send(f"<@&{NOTIFY_ROLE_ID}>")
-            await new_channel.send(embed=embed, view=view)
-            await new_channel.send(f"📬 **Новое обращение от** {user.mention}")
+            # ✅ НОВЫЙ ПОРЯДОК: РОЛЬ → ТЕКСТ → ЭМБЕД
+            msg1 = await new_channel.send(f"<@&{NOTIFY_ROLE_ID}>")
+            msg2 = await new_channel.send(f"📬 **Новое обращение от** {user.mention}")
+            msg3 = await new_channel.send(embed=embed, view=view)
+            
+            # Сохраняем ID сообщения с эмбедом для последующего обновления
+            # (можно расширить функционал для хранения в БД)
             
             await send_log(
                 bot, "🎫 Тикет создан",
@@ -419,8 +452,9 @@ async def tickets(ctx):
         color=0x9D00FF,
         timestamp=datetime.now(timezone.utc)
     )
-    embed.set_image(url="https://i.imgur.com/hbG3hwa.png")
-    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v6.4")
+    # ✅ БАННЕР ТОЛЬКО ЗДЕСЬ
+    embed.set_image(url="https://i.imgur.com/yplKlVx.jpeg")
+    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v6.7")
     
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
