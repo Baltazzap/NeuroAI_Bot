@@ -62,7 +62,7 @@ message_cooldown = defaultdict(lambda: deque())
 join_cooldown = deque()
 warns = defaultdict(int)
 mutes = {}
-ticket_owners = {}  # {channel_id: user_id}
+ticket_owners = {}
 
 # --- КАТЕГОРИИ ТИКЕТОВ ---
 TICKET_TYPES = {
@@ -221,21 +221,19 @@ class TicketView(View):
                 await interaction.response.send_message("⚠️ Только администрация и поддержка могут брать тикеты в работу.", ephemeral=True)
                 return
             
-            # ✅ ОБНОВЛЯЕМ СТАТУС В ЭМБЕДЕ
+            # ✅ ОБНОВЛЯЕМ СТАТУС В ЭМБЕДЕ (ТЕПЕРЬ С НИКНЕЙМОМ)
             try:
-                # Находим оригинальное сообщение с эмбедом тикета
                 async for message in channel.history(limit=10):
                     if message.author == bot.user and message.embeds and "ваш тикет успешно создан" in message.embeds[0].description:
-                        # Обновляем эмбед
                         old_embed = message.embeds[0]
                         new_description = old_embed.description.replace(
                             "• Статус: `🟡 Ожидает ответа`",
-                            f"• Статус: `🟢 В работе у {user.mention}`"
+                            f"• Статус: `🟢 В работе у {user.display_name}`"  # ✅ display_name вместо mention
                         )
                         new_embed = discord.Embed(
                             title=old_embed.title,
                             description=new_description,
-                            color=0x2ECC71,  # Зеленый цвет для статуса "В работе"
+                            color=0x2ECC71,
                             timestamp=datetime.now(timezone.utc)
                         )
                         new_embed.set_footer(text="🤖 AI кардинал | Система поддержки")
@@ -244,7 +242,6 @@ class TicketView(View):
             except Exception as e:
                 print(f"⚠️ Не удалось обновить эмбед: {e}")
             
-            # Отправляем уведомление
             embed = discord.Embed(
                 title="👨‍💼 Тикет взят в работу",
                 description=f"{user.mention} начал обработку вашего обращения.\nОжидайте ответа в этом канале.",
@@ -343,7 +340,6 @@ class TicketCategorySelect(Select):
                 reason=f"Тикет: {user.name} — {config['label']}"
             )
             
-            # ✅ ЭМБЕД БЕЗ БАННЕРА
             embed = discord.Embed(
                 title=f"{config['emoji']} {config['label']}",
                 description=(
@@ -361,18 +357,13 @@ class TicketCategorySelect(Select):
             )
             embed.set_footer(text="🤖 AI кардинал | Система поддержки")
             
-            # Сохраняем ID владельца тикета
             ticket_owners[new_channel.id] = user.id
             
             view = TicketView(user.id)
             
-            # ✅ НОВЫЙ ПОРЯДОК: РОЛЬ → ТЕКСТ → ЭМБЕД
-            msg1 = await new_channel.send(f"<@&{NOTIFY_ROLE_ID}>")
-            msg2 = await new_channel.send(f"📬 **Новое обращение от** {user.mention}")
-            msg3 = await new_channel.send(embed=embed, view=view)
-            
-            # Сохраняем ID сообщения с эмбедом для последующего обновления
-            # (можно расширить функционал для хранения в БД)
+            await new_channel.send(f"<@&{NOTIFY_ROLE_ID}>")
+            await new_channel.send(f"📬 **Новое обращение от** {user.mention}")
+            await new_channel.send(embed=embed, view=view)
             
             await send_log(
                 bot, "🎫 Тикет создан",
@@ -431,6 +422,10 @@ class TicketPanelView(View):
 @commands.has_permissions(manage_channels=True)
 async def tickets(ctx):
     """Создает панель управления тикетами"""
+    # ✅ ПРОВЕРКА: чтобы команда не сработала дважды
+    if ctx.author.bot:
+        return
+    
     await delete_command_message(ctx)
     
     categories_text = "\n\n".join([
@@ -452,9 +447,8 @@ async def tickets(ctx):
         color=0x9D00FF,
         timestamp=datetime.now(timezone.utc)
     )
-    # ✅ БАННЕР ТОЛЬКО ЗДЕСЬ
     embed.set_image(url="https://i.imgur.com/yplKlVx.jpeg")
-    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v6.7")
+    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v6.8")
     
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
