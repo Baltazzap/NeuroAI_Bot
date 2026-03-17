@@ -2,12 +2,14 @@ import os
 import discord
 from discord.ext import commands, tasks
 from discord.ui import Button, View, Select, button
-from discord.app_commands import CommandTree
+from discord.app_commands import CommandTree, describe
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 import re
 import asyncio
+import aiohttp
+import random
 
 # --- ЗАГРУЗКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
 load_dotenv()
@@ -34,11 +36,14 @@ TICKET_CATEGORY_ID = 1482817236984008714
 BOT_OWNER_ID = 314805583788244993
 MUTE_ROLE_ID = 1482813904697692360
 
-# ✅ РОЛЬ ПОДДЕРЖКИ (доступ к управлению тикетами)
+# ✅ РОЛЬ ПОДДЕРЖКИ
 SUPPORT_ROLE_ID = 1483016729172119684
 
-# ✅ РОЛЬ ДЛЯ УПОМИНАНИЯ В НОВЫХ ТИКЕТАХ
+# ✅ РОЛЬ ДЛЯ УПОМИНАНИЯ В ТИКЕТАХ
 NOTIFY_ROLE_ID = 1482807077620678949
+
+# ✅ КАНАЛ ДЛЯ ИИ-ГЕНЕРАЦИИ
+AI_GENERATION_CHANNEL_ID = 1483021047660806144
 
 ADMIN_ROLE_IDS = [
     1482807083937169562, 1482807085791182978, 1482807086302760960,
@@ -57,12 +62,25 @@ AUTO_MOD_CONFIG = {
     "new_account_threshold": 7,
 }
 
+# --- НАСТРОЙКИ ИИ-ГЕНЕРАЦИИ ---
+AI_GENERATION_CONFIG = {
+    "cooldown_seconds": 30,
+    "max_prompts_per_day": 10,
+    "gta_style_prompt": "GTA 5 video game style, cinematic lighting, highly detailed, realistic, 4K, game art, rockstar games style",
+    "width": 1024,
+    "height": 1024,
+    "seed": None,
+}
+
 # --- ХРАНИЛИЩА ДАННЫХ ---
 message_cooldown = defaultdict(lambda: deque())
 join_cooldown = deque()
 warns = defaultdict(int)
 mutes = {}
 ticket_owners = {}
+ai_generation_cooldown = defaultdict(float)
+ai_generation_count = defaultdict(int)
+ai_generation_date = defaultdict(str)
 
 # --- КАТЕГОРИИ ТИКЕТОВ ---
 TICKET_TYPES = {
@@ -120,7 +138,6 @@ def is_admin(member):
     return any(role.id in ADMIN_ROLE_IDS for role in member.roles) or member.id == BOT_OWNER_ID
 
 def can_manage_tickets(member):
-    """Проверка: может ли пользователь управлять тикетами"""
     return (
         any(role.id in ADMIN_ROLE_IDS for role in member.roles) or 
         member.id == BOT_OWNER_ID or
@@ -144,6 +161,264 @@ async def _delete_interaction_message(interaction: discord.Interaction):
         await interaction.original_response().delete()
     except:
         pass
+
+# ============================================
+# 🎨 ИИ-ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ (GTA STYLE)
+# ============================================
+
+async def generate_gta_image(prompt: str, seed: int = None):
+    """
+    Генерация изображения через Pollinations.ai API (БЕСПЛАТНО, без ключа)
+    Документация: https://pollinations.ai/
+    """
+    try:
+        # Добавляем GTA-стиль к промпту
+        enhanced_prompt = f"{prompt}, {AI_GENERATION_CONFIG['gta_style_prompt']}"
+        
+        # Генерируем случайный seed если не указан
+        if seed is None:
+            seed = random.randint(1, 999999)
+        
+        # Формируем URL для API
+        # Pollinations.ai использует простой URL-based API
+        width = AI_GENERATION_CONFIG["width"]
+        height = AI_GENERATION_CONFIG["height"]
+        
+        # Кодируем промпт для URL
+        import urllib.parse
+        encoded_prompt = urllib.parse.quote(enhanced_prompt)
+        
+        # URL для генерации изображения
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}&model=flux&nologo=true"
+        
+        # Проверяем что изображение доступно (опционально)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(image_url, timeout=30) as response:
+                if response.status == 200:
+                    return {
+                        "success": True,
+                        "url": image_url,
+                        "prompt": enhanced_prompt,
+                        "seed": seed
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": f"API вернул статус {response.status}"
+                    }
+                    
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+def check_generation_limit(user_id: int):
+    """Проверка лимитов генерации"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    if ai_generation_date[user_id] != today:
+        ai_generation_date[user_id] = today
+        ai_generation_count[user_id] = 0
+    
+    now = datetime.now().timestamp()
+    if now - ai_generation_cooldown[user_id] < AI_GENERATION_CONFIG["cooldown_seconds"]:
+        remaining = int(AI_GENERATION_CONFIG["cooldown_seconds"] - (now - ai_generation_cooldown[user_id]))
+        return False, f"⏱️ Пожалуйста, подождите ещё **{remaining} сек.**"
+    
+    if ai_generation_count[user_id] >= AI_GENERATION_CONFIG["max_prompts_per_day"]:
+        return False, f"📊 Вы исчерпали дневной лимит (**{AI_GENERATION_CONFIG['max_prompts_per_day']}** генераций)"
+    
+    return True, None
+
+class AIGenerationView(View):
+    def __init__(self, user_id: int, prompt: str, seed: int = None):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.prompt = prompt
+        self.seed = seed if seed else random.randint(1, 999999)
+    
+    @button(style=discord.ButtonStyle.primary, label="🔄 Перегенерировать", emoji="🔄", custom_id="ai_regenerate")
+    async def regenerate_button(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Только автор может регенерировать.", ephemeral=True)
+            return
+        
+        allowed, error_msg = check_generation_limit(interaction.user.id)
+        if not allowed:
+            await interaction.response.send_message(error_msg, ephemeral=True)
+            return
+        
+        ai_generation_cooldown[interaction.user.id] = datetime.now().timestamp()
+        ai_generation_count[interaction.user.id] += 1
+        
+        await interaction.response.defer()
+        
+        # Новый seed для уникального изображения
+        new_seed = random.randint(1, 999999)
+        result = await generate_gta_image(self.prompt, new_seed)
+        
+        if result["success"]:
+            embed = discord.Embed(
+                title="🎨 ИИ-Генерация (Обновлено)",
+                description=f"📝 **Промпт:** {self.prompt[:500]}\n🎲 **Seed:** `{new_seed}`",
+                color=0x9D00FF,
+                timestamp=datetime.now(timezone.utc)
+            )
+            embed.set_image(url=result["url"])
+            embed.set_footer(text="🤖 AI Кардинал | GTA 5 NeuroAI | Pollinations.ai")
+            
+            await interaction.followup.send(embed=embed, view=AIGenerationView(interaction.user.id, self.prompt, new_seed))
+        else:
+            await interaction.followup.send(f"❌ Ошибка генерации: {result['error']}", ephemeral=True)
+    
+    @button(style=discord.ButtonStyle.secondary, label="📥 Скачать", emoji="📥", custom_id="ai_download")
+    async def download_button(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_message("💡 Нажмите правой кнопкой на изображение → Сохранить как", ephemeral=True)
+
+@bot.command(name="ai", aliases=["генерация", "gta", "image"])
+async def ai_generate(ctx, *, prompt: str):
+    """Генерация изображения в стиле GTA 5"""
+    if ctx.channel.id != AI_GENERATION_CHANNEL_ID:
+        await ctx.send(f"⚠️ Эта команда доступна только в канале <#{AI_GENERATION_CHANNEL_ID}>", delete_after=10)
+        await delete_command_message(ctx)
+        return
+    
+    if len(prompt) < 5:
+        await ctx.send("⚠️ Промпт должен быть не менее 5 символов!", delete_after=10)
+        await delete_command_message(ctx)
+        return
+    
+    allowed, error_msg = check_generation_limit(ctx.author.id)
+    if not allowed:
+        await ctx.send(error_msg, delete_after=10)
+        await delete_command_message(ctx)
+        return
+    
+    ai_generation_cooldown[ctx.author.id] = datetime.now().timestamp()
+    ai_generation_count[ctx.author.id] += 1
+    
+    loading_embed = discord.Embed(
+        title="🎨 ИИ-Генерация...",
+        description=f"📝 **Промпт:** {prompt[:500]}\n\n⏳ Пожалуйста, подождите (10-30 сек)...",
+        color=0x9D00FF,
+        timestamp=datetime.now(timezone.utc)
+    )
+    loading_embed.set_footer(text="🤖 AI Кардинал | GTA 5 NeuroAI")
+    
+    loading_msg = await ctx.send(embed=loading_embed)
+    await delete_command_message(ctx)
+    
+    seed = random.randint(1, 999999)
+    result = await generate_gta_image(prompt, seed)
+    
+    if result["success"]:
+        embed = discord.Embed(
+            title="🎨 ИИ-Генерация завершена",
+            description=f"📝 **Промпт:** {prompt[:500]}\n🎲 **Seed:** `{seed}`",
+            color=0x2ECC71,
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.set_image(url=result["url"])
+        embed.set_footer(text="🤖 AI Кардинал | GTA 5 NeuroAI | Pollinations.ai")
+        
+        view = AIGenerationView(ctx.author.id, prompt, seed)
+        await loading_msg.edit(embed=embed, view=view)
+        
+        await send_log(
+            bot, "🎨 ИИ-Генерация",
+            f"{ctx.author.mention} сгенерировал изображение.",
+            0x9D00FF,
+            [
+                {"name": "👤 Пользователь", "value": f"`{ctx.author.name}`", "inline": True},
+                {"name": "📝 Промпт", "value": f"`{prompt[:50]}`", "inline": True},
+                {"name": "📊 Лимит", "value": f"`{ai_generation_count[ctx.author.id]}/{AI_GENERATION_CONFIG['max_prompts_per_day']}`", "inline": True}
+            ]
+        )
+    else:
+        error_embed = discord.Embed(
+            title="❌ Ошибка генерации",
+            description=f"Произошла ошибка при создании изображения.\n\n**Ошибка:** {result['error']}",
+            color=0xFF6B6B,
+            timestamp=datetime.now(timezone.utc)
+        )
+        await loading_msg.edit(embed=error_embed)
+
+@tree.command(name="ai", description="Генерация изображения в стиле GTA 5")
+@describe(prompt="Описание изображения для генерации")
+async def slash_ai_generate(interaction: discord.Interaction, prompt: str):
+    """Генерация изображения в стиле GTA 5"""
+    if interaction.channel.id != AI_GENERATION_CHANNEL_ID:
+        await interaction.response.send_message(f"⚠️ Эта команда доступна только в канале <#{AI_GENERATION_CHANNEL_ID}>", ephemeral=True)
+        return
+    
+    if len(prompt) < 5:
+        await interaction.response.send_message("⚠️ Промпт должен быть не менее 5 символов!", ephemeral=True)
+        return
+    
+    allowed, error_msg = check_generation_limit(interaction.user.id)
+    if not allowed:
+        await interaction.response.send_message(error_msg, ephemeral=True)
+        return
+    
+    ai_generation_cooldown[interaction.user.id] = datetime.now().timestamp()
+    ai_generation_count[interaction.user.id] += 1
+    
+    await interaction.response.defer()
+    
+    seed = random.randint(1, 999999)
+    result = await generate_gta_image(prompt, seed)
+    
+    if result["success"]:
+        embed = discord.Embed(
+            title="🎨 ИИ-Генерация завершена",
+            description=f"📝 **Промпт:** {prompt[:500]}\n🎲 **Seed:** `{seed}`",
+            color=0x2ECC71,
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.set_image(url=result["url"])
+        embed.set_footer(text="🤖 AI Кардинал | GTA 5 NeuroAI | Pollinations.ai")
+        
+        view = AIGenerationView(interaction.user.id, prompt, seed)
+        await interaction.followup.send(embed=embed, view=view)
+        
+        await send_log(
+            bot, "🎨 ИИ-Генерация",
+            f"{interaction.user.mention} сгенерировал изображение.",
+            0x9D00FF,
+            [
+                {"name": "👤 Пользователь", "value": f"`{interaction.user.name}`", "inline": True},
+                {"name": "📝 Промпт", "value": f"`{prompt[:50]}`", "inline": True},
+                {"name": "📊 Лимит", "value": f"`{ai_generation_count[interaction.user.id]}/{AI_GENERATION_CONFIG['max_prompts_per_day']}`", "inline": True}
+            ]
+        )
+    else:
+        await interaction.followup.send(f"❌ Ошибка генерации: {result['error']}", ephemeral=True)
+
+@bot.command(name="aistats")
+async def ai_stats(ctx):
+    """Проверить статистику использования ИИ-генерации"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    if ai_generation_date[ctx.author.id] != today:
+        ai_generation_date[ctx.author.id] = today
+        ai_generation_count[ctx.author.id] = 0
+    
+    embed = discord.Embed(
+        title="📊 Статистика ИИ-Генерации",
+        description=f"Ваша статистика использования генерации изображений.",
+        color=0x9D00FF,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.add_field(name="📝 Использовано сегодня", value=f"`{ai_generation_count[ctx.author.id]}/{AI_GENERATION_CONFIG['max_prompts_per_day']}`", inline=True)
+    embed.add_field(name="⏱️ Кулдаун", value=f"`{AI_GENERATION_CONFIG['cooldown_seconds']} сек.`", inline=True)
+    
+    remaining = AI_GENERATION_CONFIG["max_prompts_per_day"] - ai_generation_count[ctx.author.id]
+    embed.add_field(name="📊 Осталось", value=f"`{remaining}`", inline=True)
+    embed.set_footer(text="🤖 AI Кардинал | GTA 5 NeuroAI")
+    
+    await ctx.send(embed=embed, delete_after=30)
+    await delete_command_message(ctx)
 
 # ============================================
 # 🎫 СИСТЕМА ТИКЕТОВ
@@ -221,14 +496,13 @@ class TicketView(View):
                 await interaction.response.send_message("⚠️ Только администрация и поддержка могут брать тикеты в работу.", ephemeral=True)
                 return
             
-            # ✅ ОБНОВЛЯЕМ СТАТУС В ЭМБЕДЕ (ТЕПЕРЬ С НИКНЕЙМОМ)
             try:
                 async for message in channel.history(limit=10):
                     if message.author == bot.user and message.embeds and "ваш тикет успешно создан" in message.embeds[0].description:
                         old_embed = message.embeds[0]
                         new_description = old_embed.description.replace(
                             "• Статус: `🟡 Ожидает ответа`",
-                            f"• Статус: `🟢 В работе у {user.display_name}`"  # ✅ display_name вместо mention
+                            f"• Статус: `🟢 В работе у {user.display_name}`"
                         )
                         new_embed = discord.Embed(
                             title=old_embed.title,
@@ -422,7 +696,6 @@ class TicketPanelView(View):
 @commands.has_permissions(manage_channels=True)
 async def tickets(ctx):
     """Создает панель управления тикетами"""
-    # ✅ ПРОВЕРКА: чтобы команда не сработала дважды
     if ctx.author.bot:
         return
     
@@ -448,7 +721,7 @@ async def tickets(ctx):
         timestamp=datetime.now(timezone.utc)
     )
     embed.set_image(url="https://i.imgur.com/yplKlVx.jpeg")
-    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v6.8")
+    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v7.0")
     
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
@@ -705,9 +978,10 @@ async def on_member_remove(member):
 @bot.event
 async def on_ready():
     bot.add_view(TicketPanelView())
+    bot.add_view(AIGenerationView(0, "", 1))
     
     @tree.command(name="mute", description="Заглушить пользователя на указанное время")
-    @discord.app_commands.describe(member="Пользователь для мута", duration="Длительность в минутах", reason="Причина мута")
+    @describe(member="Пользователь для мута", duration="Длительность в минутах", reason="Причина мута")
     @discord.app_commands.checks.has_permissions(manage_roles=True)
     async def slash_mute(interaction: discord.Interaction, member: discord.Member, duration: int, reason: str = "Нарушение правил"):
         if not is_admin(interaction.user):
@@ -740,7 +1014,7 @@ async def on_ready():
         delete_command_message_from_interaction(interaction)
     
     @tree.command(name="unmute", description="Разглушить пользователя")
-    @discord.app_commands.describe(member="Пользователь для размута")
+    @describe(member="Пользователь для размута")
     @discord.app_commands.checks.has_permissions(manage_roles=True)
     async def slash_unmute(interaction: discord.Interaction, member: discord.Member):
         if not is_admin(interaction.user):
@@ -770,7 +1044,7 @@ async def on_ready():
         delete_command_message_from_interaction(interaction)
     
     @tree.command(name="warn", description="Выдать предупреждение пользователю")
-    @discord.app_commands.describe(member="Пользователь для предупреждения", reason="Причина предупреждения")
+    @describe(member="Пользователь для предупреждения", reason="Причина предупреждения")
     @discord.app_commands.checks.has_permissions(manage_roles=True)
     async def slash_warn(interaction: discord.Interaction, member: discord.Member, reason: str = "Нарушение правил"):
         if not is_admin(interaction.user):
@@ -800,7 +1074,7 @@ async def on_ready():
         delete_command_message_from_interaction(interaction)
     
     @tree.command(name="warns", description="Проверить предупреждения пользователя")
-    @discord.app_commands.describe(member="Пользователь для проверки")
+    @describe(member="Пользователь для проверки")
     @discord.app_commands.checks.has_permissions(manage_roles=True)
     async def slash_warns(interaction: discord.Interaction, member: discord.Member):
         if not is_admin(interaction.user):
@@ -811,7 +1085,7 @@ async def on_ready():
         delete_command_message_from_interaction(interaction)
     
     @tree.command(name="raidmode", description="Включить/выключить режим защиты от рейдов")
-    @discord.app_commands.describe(status="on - включить, off - выключить")
+    @describe(status="on - включить, off - выключить")
     @discord.app_commands.checks.has_permissions(administrator=True)
     async def slash_raidmode(interaction: discord.Interaction, status: str):
         if not is_admin(interaction.user):
@@ -830,7 +1104,7 @@ async def on_ready():
         delete_command_message_from_interaction(interaction)
     
     @tree.command(name="clear", description="Очистить сообщения в канале")
-    @discord.app_commands.describe(amount="Количество сообщений для удаления (1-100)")
+    @describe(amount="Количество сообщений для удаления (1-100)")
     @discord.app_commands.checks.has_permissions(manage_messages=True)
     async def slash_clear(interaction: discord.Interaction, amount: int):
         if not is_admin(interaction.user):
@@ -857,7 +1131,7 @@ async def on_ready():
     
     try:
         await tree.sync()
-        print(f"✅ Slash команды синхронизированы (6 команд)")
+        print(f"✅ Slash команды синхронизированы (7 команд)")
     except Exception as e:
         print(f"⚠️ Ошибка синхронизации команд: {e}")
     
@@ -870,19 +1144,21 @@ async def on_ready():
     print(f"🤖 AI кардинал подключен...")
     print(f"📡 {bot.user.name} | 🆔 {bot.user.id}")
     print(f"🎫 Система тикетов: активна")
+    print(f"🎨 ИИ-Генерация: активна (Pollinations.ai)")
     print(f"🛡️ Авто-модерация: активна")
     print(f"🔇 Роль мута: {MUTE_ROLE_ID}")
     print(f"👋 Канал приветствий: {WELCOME_CHANNEL_ID}")
     print(f"🎭 Авто-роль: {AUTO_ROLE_ID}")
     print(f"👨‍💼 Support роль: {SUPPORT_ROLE_ID}")
     print(f"📬 Notify роль: {NOTIFY_ROLE_ID}")
+    print(f"🎨 AI канал: {AI_GENERATION_CHANNEL_ID}")
     print(f"⚙️ Команды: / и !")
     print("-" * 30)
     await send_log(bot, "🟢 Система запущена", "**AI кардинал** подключился.", 0x2ECC71, [
         {"name": "📡 Статус", "value": "`Онлайн (DND)`", "inline": True},
         {"name": "🎫 Тикеты", "value": "`Активны`", "inline": True},
         {"name": "🛡️ Авто-мод", "value": "`Активен`", "inline": True},
-        {"name": "⚙️ Команды", "value": "`/ и !`", "inline": True}
+        {"name": "🎨 ИИ", "value": "`Активен`", "inline": True}
     ])
 
 # ============================================
