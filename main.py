@@ -10,6 +10,7 @@ import re
 import asyncio
 import aiohttp
 import random
+import urllib.parse
 
 # --- ЗАГРУЗКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
 load_dotenv()
@@ -69,7 +70,6 @@ AI_GENERATION_CONFIG = {
     "gta_style_prompt": "GTA 5 video game style, cinematic lighting, highly detailed, realistic, 4K, game art, rockstar games style",
     "width": 1024,
     "height": 1024,
-    "seed": None,
 }
 
 # --- ХРАНИЛИЩА ДАННЫХ ---
@@ -167,31 +167,19 @@ async def _delete_interaction_message(interaction: discord.Interaction):
 # ============================================
 
 async def generate_gta_image(prompt: str, seed: int = None):
-    """
-    Генерация изображения через Pollinations.ai API (БЕСПЛАТНО, без ключа)
-    Документация: https://pollinations.ai/
-    """
+    """Генерация изображения через Pollinations.ai API (БЕСПЛАТНО)"""
     try:
-        # Добавляем GTA-стиль к промпту
         enhanced_prompt = f"{prompt}, {AI_GENERATION_CONFIG['gta_style_prompt']}"
         
-        # Генерируем случайный seed если не указан
         if seed is None:
             seed = random.randint(1, 999999)
         
-        # Формируем URL для API
-        # Pollinations.ai использует простой URL-based API
         width = AI_GENERATION_CONFIG["width"]
         height = AI_GENERATION_CONFIG["height"]
-        
-        # Кодируем промпт для URL
-        import urllib.parse
         encoded_prompt = urllib.parse.quote(enhanced_prompt)
         
-        # URL для генерации изображения
         image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}&model=flux&nologo=true"
         
-        # Проверяем что изображение доступно (опционально)
         async with aiohttp.ClientSession() as session:
             async with session.get(image_url, timeout=30) as response:
                 if response.status == 200:
@@ -233,7 +221,7 @@ def check_generation_limit(user_id: int):
 
 class AIGenerationView(View):
     def __init__(self, user_id: int, prompt: str, seed: int = None):
-        super().__init__(timeout=300)
+        super().__init__(timeout=300)  # 5 минут таймаут
         self.user_id = user_id
         self.prompt = prompt
         self.seed = seed if seed else random.randint(1, 999999)
@@ -254,7 +242,6 @@ class AIGenerationView(View):
         
         await interaction.response.defer()
         
-        # Новый seed для уникального изображения
         new_seed = random.randint(1, 999999)
         result = await generate_gta_image(self.prompt, new_seed)
         
@@ -721,7 +708,7 @@ async def tickets(ctx):
         timestamp=datetime.now(timezone.utc)
     )
     embed.set_image(url="https://i.imgur.com/yplKlVx.jpeg")
-    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v7.0")
+    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v7.1")
     
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
@@ -977,8 +964,9 @@ async def on_member_remove(member):
 
 @bot.event
 async def on_ready():
+    # ✅ РЕГИСТРАЦИЯ ТОЛЬКО PERSISTENT VIEWS (без timeout)
     bot.add_view(TicketPanelView())
-    bot.add_view(AIGenerationView(0, "", 1))
+    # ❌ AIGenerationView НЕ регистрируем - у него есть timeout=300
     
     @tree.command(name="mute", description="Заглушить пользователя на указанное время")
     @describe(member="Пользователь для мута", duration="Длительность в минутах", reason="Причина мута")
