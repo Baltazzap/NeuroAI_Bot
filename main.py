@@ -376,7 +376,6 @@ class CreateTicketButton(Button):
         super().__init__(
             style=discord.ButtonStyle.primary,
             label="Создать обращение",
-            emoji="",
             custom_id="create_ticket_btn"
         )
 
@@ -432,7 +431,7 @@ async def tickets(ctx):
         timestamp=datetime.now(timezone.utc)
     )
     embed.set_image(url="https://i.imgur.com/yplKlVx.jpeg")
-    embed.set_footer(text="AI кардинал | NeuroAI support v8.2")
+    embed.set_footer(text="AI кардинал | NeuroAI support v8.3")
     
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
