@@ -8,15 +8,10 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 import re
 import asyncio
-import aiohttp
-import random
-import urllib.parse
-import base64
 
 # --- ЗАГРУЗКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
-HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN")  # Опционально
 
 if not TOKEN:
     print("❌ Ошибка: токен не найден в переменных окружения (.env)")
@@ -45,9 +40,6 @@ SUPPORT_ROLE_ID = 1483016729172119684
 # ✅ РОЛЬ ДЛЯ УПОМИНАНИЯ В ТИКЕТАХ
 NOTIFY_ROLE_ID = 1482807077620678949
 
-# ✅ КАНАЛ ДЛЯ ИИ-ГЕНЕРАЦИИ
-AI_GENERATION_CHANNEL_ID = 1483021047660806144
-
 ADMIN_ROLE_IDS = [
     1482807083937169562, 1482807085791182978, 1482807086302760960,
     1482813905293017270, 1482813906085740724,
@@ -65,24 +57,12 @@ AUTO_MOD_CONFIG = {
     "new_account_threshold": 7,
 }
 
-# --- НАСТРОЙКИ ИИ-ГЕНЕРАЦИИ ---
-AI_GENERATION_CONFIG = {
-    "cooldown_seconds": 30,
-    "max_prompts_per_day": 10,
-    "gta_style_prompt": "GTA 5 video game style, cinematic lighting, highly detailed, realistic, 4K, game art, rockstar games style",
-    "width": 1024,
-    "height": 1024,
-}
-
 # --- ХРАНИЛИЩА ДАННЫХ ---
 message_cooldown = defaultdict(lambda: deque())
 join_cooldown = deque()
 warns = defaultdict(int)
 mutes = {}
 ticket_owners = {}
-ai_generation_cooldown = defaultdict(float)
-ai_generation_count = defaultdict(int)
-ai_generation_date = defaultdict(str)
 
 # --- КАТЕГОРИИ ТИКЕТОВ ---
 TICKET_TYPES = {
@@ -163,340 +143,6 @@ async def _delete_interaction_message(interaction: discord.Interaction):
         await interaction.original_response().delete()
     except:
         pass
-
-# ============================================
-# 🎨 ИИ-ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ (GTA STYLE)
-# ============================================
-
-async def generate_gta_image(prompt: str, seed: int = None):
-    """
-    Генерация изображения с несколькими API (Pollinations + Hugging Face)
-    """
-    try:
-        enhanced_prompt = f"{prompt}, {AI_GENERATION_CONFIG['gta_style_prompt']}"
-        
-        if seed is None:
-            seed = random.randint(1, 999999)
-        
-        width = AI_GENERATION_CONFIG["width"]
-        height = AI_GENERATION_CONFIG["height"]
-        encoded_prompt = urllib.parse.quote(enhanced_prompt)
-        
-        # ✅ API #1: Pollinations.ai (несколько эндпоинтов)
-        pollinations_urls = [
-            f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}&model=flux&nologo=true",
-            f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}&model=flux",
-            f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}",
-        ]
-        
-        async with aiohttp.ClientSession() as session:
-            # Пробуем Pollinations.ai
-            for i, image_url in enumerate(pollinations_urls):
-                try:
-                    async with session.get(image_url, timeout=30) as response:
-                        if response.status == 200:
-                            content_type = response.headers.get('Content-Type', '')
-                            if 'image' in content_type:
-                                print(f"✅ Pollinations.ai: Успех (попытка {i+1})")
-                                return {
-                                    "success": True,
-                                    "url": image_url,
-                                    "prompt": enhanced_prompt,
-                                    "seed": seed,
-                                    "api": "Pollinations.ai"
-                                }
-                except Exception as e:
-                    print(f"⚠️ Pollinations.ai попытка {i+1}: {e}")
-                    continue
-            
-            # ✅ API #2: Hugging Face Inference API (если есть токен)
-            if HUGGINGFACE_TOKEN:
-                print("🔄 Пробуем Hugging Face API...")
-                try:
-                    hf_payload = {
-                        "inputs": enhanced_prompt,
-                        "parameters": {
-                            "width": width,
-                            "height": height,
-                            "num_inference_steps": 25
-                        }
-                    }
-                    
-                    async with session.post(
-                        "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0",
-                        headers={"Authorization": f"Bearer {HUGGINGFACE_TOKEN}"},
-                        json=hf_payload,
-                        timeout=60
-                    ) as response:
-                        if response.status == 200:
-                            image_bytes = await response.read()
-                            # Сохраняем изображение и получаем URL (или используем base64)
-                            # Для простоты возвращаем временный URL
-                            print("✅ Hugging Face: Успех")
-                            return {
-                                "success": True,
-                                "url": "image/png;base64," + base64.b64encode(image_bytes).decode(),
-                                "prompt": enhanced_prompt,
-                                "seed": seed,
-                                "api": "Hugging Face"
-                            }
-                        else:
-                            print(f"⚠️ Hugging Face: Статус {response.status}")
-                except Exception as e:
-                    print(f"⚠️ Hugging Face: {e}")
-            
-            # ✅ API #3: Резервный вариант - простой генератор
-            print("🔄 Используем резервный вариант...")
-            # Возвращаем заглушку с информацией что API недоступны
-            return {
-                "success": False,
-                "error": "Сервисы генерации временно недоступны. Попробуйте через 5-10 минут.",
-                "api": "None"
-            }
-                    
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"Критическая ошибка: {str(e)}",
-            "api": "None"
-        }
-
-def check_generation_limit(user_id: int):
-    """Проверка лимитов генерации"""
-    today = datetime.now().strftime("%Y-%m-%d")
-    
-    if ai_generation_date[user_id] != today:
-        ai_generation_date[user_id] = today
-        ai_generation_count[user_id] = 0
-    
-    now = datetime.now().timestamp()
-    if now - ai_generation_cooldown[user_id] < AI_GENERATION_CONFIG["cooldown_seconds"]:
-        remaining = int(AI_GENERATION_CONFIG["cooldown_seconds"] - (now - ai_generation_cooldown[user_id]))
-        return False, f"⏱️ Пожалуйста, подождите ещё **{remaining} сек.**"
-    
-    if ai_generation_count[user_id] >= AI_GENERATION_CONFIG["max_prompts_per_day"]:
-        return False, f"📊 Вы исчерпали дневной лимит (**{AI_GENERATION_CONFIG['max_prompts_per_day']}** генераций)"
-    
-    return True, None
-
-class AIGenerationView(View):
-    def __init__(self, user_id: int, prompt: str, seed: int = None):
-        super().__init__(timeout=300)
-        self.user_id = user_id
-        self.prompt = prompt
-        self.seed = seed if seed else random.randint(1, 999999)
-    
-    @button(style=discord.ButtonStyle.primary, label="🔄 Перегенерировать", emoji="🔄", custom_id="ai_regenerate")
-    async def regenerate_button(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ Только автор может регенерировать.", ephemeral=True)
-            return
-        
-        allowed, error_msg = check_generation_limit(interaction.user.id)
-        if not allowed:
-            await interaction.response.send_message(error_msg, ephemeral=True)
-            return
-        
-        ai_generation_cooldown[interaction.user.id] = datetime.now().timestamp()
-        ai_generation_count[interaction.user.id] += 1
-        
-        await interaction.response.defer()
-        
-        new_seed = random.randint(1, 999999)
-        result = await generate_gta_image(self.prompt, new_seed)
-        
-        if result["success"]:
-            embed = discord.Embed(
-                title="🎨 ИИ-Генерация (Обновлено)",
-                description=f"📝 **Промпт:** {self.prompt[:500]}\n🎲 **Seed:** `{new_seed}`\n🔧 **API:** {result.get('api', 'Unknown')}",
-                color=0x9D00FF,
-                timestamp=datetime.now(timezone.utc)
-            )
-            embed.set_image(url=result["url"])
-            embed.set_footer(text="🤖 AI Кардинал | GTA 5 NeuroAI")
-            
-            await interaction.followup.send(embed=embed, view=AIGenerationView(interaction.user.id, self.prompt, new_seed))
-        else:
-            await interaction.followup.send(f"❌ Ошибка генерации: {result['error']}", ephemeral=True)
-    
-    @button(style=discord.ButtonStyle.secondary, label="📥 Скачать", emoji="📥", custom_id="ai_download")
-    async def download_button(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("💡 Нажмите правой кнопкой на изображение → Сохранить как", ephemeral=True)
-
-@bot.command(name="ai", aliases=["генерация", "gta", "image"])
-async def ai_generate(ctx, *, prompt: str):
-    """Генерация изображения в стиле GTA 5"""
-    if ctx.channel.id != AI_GENERATION_CHANNEL_ID:
-        await ctx.send(f"⚠️ Эта команда доступна только в канале <#{AI_GENERATION_CHANNEL_ID}>", delete_after=10)
-        await delete_command_message(ctx)
-        return
-    
-    if len(prompt) < 5:
-        await ctx.send("⚠️ Промпт должен быть не менее 5 символов!", delete_after=10)
-        await delete_command_message(ctx)
-        return
-    
-    allowed, error_msg = check_generation_limit(ctx.author.id)
-    if not allowed:
-        await ctx.send(error_msg, delete_after=10)
-        await delete_command_message(ctx)
-        return
-    
-    ai_generation_cooldown[ctx.author.id] = datetime.now().timestamp()
-    ai_generation_count[ctx.author.id] += 1
-    
-    loading_embed = discord.Embed(
-        title="🎨 ИИ-Генерация...",
-        description=f"📝 **Промпт:** {prompt[:500]}\n\n⏳ Пожалуйста, подождите (10-60 сек)...",
-        color=0x9D00FF,
-        timestamp=datetime.now(timezone.utc)
-    )
-    loading_embed.set_footer(text="🤖 AI Кардинал | GTA 5 NeuroAI")
-    
-    loading_msg = await ctx.send(embed=loading_embed)
-    await delete_command_message(ctx)
-    
-    # ✅ ДО 5 ПОПЫТОК ГЕНЕРАЦИИ
-    seed = random.randint(1, 999999)
-    result = None
-    for attempt in range(5):
-        result = await generate_gta_image(prompt, seed + attempt)
-        if result["success"]:
-            break
-        if attempt < 4:
-            await loading_msg.edit(
-                embed=discord.Embed(
-                    title="🎨 ИИ-Генерация...",
-                    description=f"📝 **Промпт:** {prompt[:500]}\n\n⏳ Попытка {attempt+2}/5...\n🔧 Пробуем другой API...",
-                    color=0x9D00FF,
-                    timestamp=datetime.now(timezone.utc)
-                )
-            )
-            await asyncio.sleep(3)
-    
-    if result["success"]:
-        embed = discord.Embed(
-            title="🎨 ИИ-Генерация завершена",
-            description=f"📝 **Промпт:** {prompt[:500]}\n🎲 **Seed:** `{seed}`\n🔧 **API:** {result.get('api', 'Unknown')}",
-            color=0x2ECC71,
-            timestamp=datetime.now(timezone.utc)
-        )
-        embed.set_image(url=result["url"])
-        embed.set_footer(text="🤖 AI Кардинал | GTA 5 NeuroAI")
-        
-        view = AIGenerationView(ctx.author.id, prompt, seed)
-        await loading_msg.edit(embed=embed, view=view)
-        
-        await send_log(
-            bot, "🎨 ИИ-Генерация",
-            f"{ctx.author.mention} сгенерировал изображение.",
-            0x9D00FF,
-            [
-                {"name": "👤 Пользователь", "value": f"`{ctx.author.name}`", "inline": True},
-                {"name": "📝 Промпт", "value": f"`{prompt[:50]}`", "inline": True},
-                {"name": "🔧 API", "value": f"`{result.get('api', 'Unknown')}`", "inline": True},
-                {"name": "📊 Лимит", "value": f"`{ai_generation_count[ctx.author.id]}/{AI_GENERATION_CONFIG['max_prompts_per_day']}`", "inline": False}
-            ]
-        )
-    else:
-        error_embed = discord.Embed(
-            title="❌ Ошибка генерации",
-            description=(
-                f"Произошла ошибка при создании изображения.\n\n"
-                f"**Ошибка:** {result['error']}\n\n"
-                f"💡 **Советы:**\n"
-                f"• Попробуйте более короткий промпт на английском\n"
-                f"• Избегайте специальных символов\n"
-                f"• Подождите 5-10 минут и попробуйте снова\n"
-                f"• Промпт: `Red sports car in city`"
-            ),
-            color=0xFF6B6B,
-            timestamp=datetime.now(timezone.utc)
-        )
-        await loading_msg.edit(embed=error_embed)
-
-@tree.command(name="ai", description="Генерация изображения в стиле GTA 5")
-@describe(prompt="Описание изображения для генерации")
-async def slash_ai_generate(interaction: discord.Interaction, prompt: str):
-    """Генерация изображения в стиле GTA 5"""
-    if interaction.channel.id != AI_GENERATION_CHANNEL_ID:
-        await interaction.response.send_message(f"⚠️ Эта команда доступна только в канале <#{AI_GENERATION_CHANNEL_ID}>", ephemeral=True)
-        return
-    
-    if len(prompt) < 5:
-        await interaction.response.send_message("⚠️ Промпт должен быть не менее 5 символов!", ephemeral=True)
-        return
-    
-    allowed, error_msg = check_generation_limit(interaction.user.id)
-    if not allowed:
-        await interaction.response.send_message(error_msg, ephemeral=True)
-        return
-    
-    ai_generation_cooldown[interaction.user.id] = datetime.now().timestamp()
-    ai_generation_count[interaction.user.id] += 1
-    
-    await interaction.response.defer()
-    
-    # ✅ ДО 5 ПОПЫТОК ГЕНЕРАЦИИ
-    seed = random.randint(1, 999999)
-    result = None
-    for attempt in range(5):
-        result = await generate_gta_image(prompt, seed + attempt)
-        if result["success"]:
-            break
-        if attempt < 4:
-            await asyncio.sleep(3)
-    
-    if result["success"]:
-        embed = discord.Embed(
-            title="🎨 ИИ-Генерация завершена",
-            description=f"📝 **Промпт:** {prompt[:500]}\n🎲 **Seed:** `{seed}`\n🔧 **API:** {result.get('api', 'Unknown')}",
-            color=0x2ECC71,
-            timestamp=datetime.now(timezone.utc)
-        )
-        embed.set_image(url=result["url"])
-        embed.set_footer(text="🤖 AI Кардинал | GTA 5 NeuroAI")
-        
-        view = AIGenerationView(interaction.user.id, prompt, seed)
-        await interaction.followup.send(embed=embed, view=view)
-        
-        await send_log(
-            bot, "🎨 ИИ-Генерация",
-            f"{interaction.user.mention} сгенерировал изображение.",
-            0x9D00FF,
-            [
-                {"name": "👤 Пользователь", "value": f"`{interaction.user.name}`", "inline": True},
-                {"name": "📝 Промпт", "value": f"`{prompt[:50]}`", "inline": True},
-                {"name": "🔧 API", "value": f"`{result.get('api', 'Unknown')}`", "inline": True}
-            ]
-        )
-    else:
-        await interaction.followup.send(f"❌ Ошибка генерации: {result['error']}", ephemeral=True)
-
-@bot.command(name="aistats")
-async def ai_stats(ctx):
-    """Проверить статистику использования ИИ-генерации"""
-    today = datetime.now().strftime("%Y-%m-%d")
-    
-    if ai_generation_date[ctx.author.id] != today:
-        ai_generation_date[ctx.author.id] = today
-        ai_generation_count[ctx.author.id] = 0
-    
-    embed = discord.Embed(
-        title="📊 Статистика ИИ-Генерации",
-        description=f"Ваша статистика использования генерации изображений.",
-        color=0x9D00FF,
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed.add_field(name="📝 Использовано сегодня", value=f"`{ai_generation_count[ctx.author.id]}/{AI_GENERATION_CONFIG['max_prompts_per_day']}`", inline=True)
-    embed.add_field(name="⏱️ Кулдаун", value=f"`{AI_GENERATION_CONFIG['cooldown_seconds']} сек.`", inline=True)
-    
-    remaining = AI_GENERATION_CONFIG["max_prompts_per_day"] - ai_generation_count[ctx.author.id]
-    embed.add_field(name="📊 Осталось", value=f"`{remaining}`", inline=True)
-    embed.set_footer(text="🤖 AI Кардинал | GTA 5 NeuroAI")
-    
-    await ctx.send(embed=embed, delete_after=30)
-    await delete_command_message(ctx)
 
 # ============================================
 # 🎫 СИСТЕМА ТИКЕТОВ
@@ -799,7 +445,7 @@ async def tickets(ctx):
         timestamp=datetime.now(timezone.utc)
     )
     embed.set_image(url="https://i.imgur.com/yplKlVx.jpeg")
-    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v7.3")
+    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v8.0")
     
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
@@ -996,18 +642,17 @@ async def on_member_join(member):
             embed = discord.Embed(
                 title="📡 Обнаружено новое подключение",
                 description=(
+                    f"Добро пожаловать в **GTA 5 NeuroAI RolePlay**.\n"
                     f"**Пользователь:** {member.mention}\n"
                     f"**ID системы:** `{member.id}`\n"
-                    f"**Статус:** Синхронизация завершена\n\n"
-                    f"Добро пожаловать в **GTA 5 NeuroAI RolePlay**.\n"
-                    f"Вам автоматически выдана роль доступа к системе."
+                    f"**Статус:** Синхронизация завершена\n"
                 ),
                 color=0x9D00FF,
                 timestamp=datetime.now(timezone.utc)
             )
             embed.add_field(
-                name="📜 Ознакомление с протоколами",
-                value=f"Внимательно изучите правила в канале <#{RULES_CHANNEL_ID}>\n\n⚠️ **Внимание:** нарушение протоколов приведет к блокировке доступа.",
+                name="",
+                value=f"Внимательно изучите правила в канале <#{RULES_CHANNEL_ID}>\n\n **Внимание:** нарушение протоколов приведет к блокировке доступа.",
                 inline=False
             )
             embed.set_footer(text="🤖 AI кардинал | NeuroAI system v1.0")
@@ -1208,7 +853,7 @@ async def on_ready():
     
     try:
         await tree.sync()
-        print(f"✅ Slash команды синхронизированы (7 команд)")
+        print(f"✅ Slash команды синхронизированы (6 команд)")
     except Exception as e:
         print(f"⚠️ Ошибка синхронизации команд: {e}")
     
@@ -1221,21 +866,18 @@ async def on_ready():
     print(f"🤖 AI кардинал подключен...")
     print(f"📡 {bot.user.name} | 🆔 {bot.user.id}")
     print(f"🎫 Система тикетов: активна")
-    print(f"🎨 ИИ-Генерация: активна (Pollinations + Hugging Face)")
     print(f"🛡️ Авто-модерация: активна")
     print(f"🔇 Роль мута: {MUTE_ROLE_ID}")
     print(f"👋 Канал приветствий: {WELCOME_CHANNEL_ID}")
     print(f"🎭 Авто-роль: {AUTO_ROLE_ID}")
     print(f"👨‍💼 Support роль: {SUPPORT_ROLE_ID}")
     print(f"📬 Notify роль: {NOTIFY_ROLE_ID}")
-    print(f"🎨 AI канал: {AI_GENERATION_CHANNEL_ID}")
     print(f"⚙️ Команды: / и !")
     print("-" * 30)
     await send_log(bot, "🟢 Система запущена", "**AI кардинал** подключился.", 0x2ECC71, [
         {"name": "📡 Статус", "value": "`Онлайн (DND)`", "inline": True},
         {"name": "🎫 Тикеты", "value": "`Активны`", "inline": True},
-        {"name": "🛡️ Авто-мод", "value": "`Активен`", "inline": True},
-        {"name": "🎨 ИИ", "value": "`Активен`", "inline": True}
+        {"name": "🛡️ Авто-мод", "value": "`Активен`", "inline": True}
     ])
 
 # ============================================
