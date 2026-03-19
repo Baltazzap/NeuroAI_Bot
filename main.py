@@ -423,16 +423,12 @@ async def tickets(ctx):
             f"Добро пожаловать в центр поддержки **GTA 5 NeuroAI RolePlay**.\n\n"
             f"Нажмите на кнопку ниже, чтобы создать обращение. Выберите категорию, и система автоматически создаст приватный канал для связи с администрацией.\n\n"
             f"📋 Доступные категории:\n{categories_text}\n\n"
-            f"⚡ Преимущества:\n"
-            f"• 🔒 Конфиденциальность — тикет видят только вы и администрация\n"
-            f"• 📊 Быстрый ответ — среднее время: 15 минут\n"
-            f"• 🤖 Прозрачность — статус отслеживается в реальном времени"
         ),
         color=0x9D00FF,
         timestamp=datetime.now(timezone.utc)
     )
     embed.set_image(url="https://i.imgur.com/yplKlVx.jpeg")
-    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v8.1")
+    embed.set_footer(text="AI кардинал | NeuroAI support v8.1")
     
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
@@ -638,8 +634,8 @@ async def on_member_join(member):
                 timestamp=datetime.now(timezone.utc)
             )
             embed.add_field(
-                name="📜 Ознакомление с протоколами",
-                value=f"Внимательно изучите правила в канале <#{RULES_CHANNEL_ID}>\n\n⚠️ **Внимание:** нарушение протоколов приведет к блокировке доступа.",
+                name="",
+                value=f"Внимательно изучите правила в канале <#{RULES_CHANNEL_ID}>\n\n **Внимание:** нарушение протоколов приведет к блокировке доступа.",
                 inline=False
             )
             embed.set_footer(text="AI кардинал | NeuroAI system v1.0")
