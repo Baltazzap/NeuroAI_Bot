@@ -11,10 +11,12 @@ import asyncio
 import aiohttp
 import random
 import urllib.parse
+import base64
 
 # --- ЗАГРУЗКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
+HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN")  # Опционально
 
 if not TOKEN:
     print("❌ Ошибка: токен не найден в переменных окружения (.env)")
@@ -167,7 +169,9 @@ async def _delete_interaction_message(interaction: discord.Interaction):
 # ============================================
 
 async def generate_gta_image(prompt: str, seed: int = None):
-    """Генерация изображения через Pollinations.ai API с обработкой ошибок"""
+    """
+    Генерация изображения с несколькими API (Pollinations + Hugging Face)
+    """
     try:
         enhanced_prompt = f"{prompt}, {AI_GENERATION_CONFIG['gta_style_prompt']}"
         
@@ -178,49 +182,83 @@ async def generate_gta_image(prompt: str, seed: int = None):
         height = AI_GENERATION_CONFIG["height"]
         encoded_prompt = urllib.parse.quote(enhanced_prompt)
         
-        # ✅ НЕСКОЛЬКО ВАРИАНТОВ URL ДЛЯ НАДЁЖНОСТИ
-        urls = [
+        # ✅ API #1: Pollinations.ai (несколько эндпоинтов)
+        pollinations_urls = [
             f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}&model=flux&nologo=true",
             f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}&model=flux",
             f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}",
         ]
         
-        # ✅ ПРОБУЕМ НЕСКОЛЬКО РАЗ С РАЗНЫМИ URL
         async with aiohttp.ClientSession() as session:
-            for i, image_url in enumerate(urls):
+            # Пробуем Pollinations.ai
+            for i, image_url in enumerate(pollinations_urls):
                 try:
                     async with session.get(image_url, timeout=30) as response:
                         if response.status == 200:
                             content_type = response.headers.get('Content-Type', '')
                             if 'image' in content_type:
+                                print(f"✅ Pollinations.ai: Успех (попытка {i+1})")
                                 return {
                                     "success": True,
                                     "url": image_url,
                                     "prompt": enhanced_prompt,
-                                    "seed": seed
+                                    "seed": seed,
+                                    "api": "Pollinations.ai"
                                 }
-                        elif response.status == 500:
-                            print(f"⚠️ Попытка {i+1}: API вернул 500, пробуем следующий URL...")
-                            continue
-                        else:
-                            print(f"⚠️ Попытка {i+1}: API вернул статус {response.status}")
-                            continue
-                except asyncio.TimeoutError:
-                    print(f"⚠️ Попытка {i+1}: Таймаут, пробуем следующий URL...")
-                    continue
                 except Exception as e:
-                    print(f"⚠️ Попытка {i+1}: Ошибка {e}, пробуем следующий URL...")
+                    print(f"⚠️ Pollinations.ai попытка {i+1}: {e}")
                     continue
             
+            # ✅ API #2: Hugging Face Inference API (если есть токен)
+            if HUGGINGFACE_TOKEN:
+                print("🔄 Пробуем Hugging Face API...")
+                try:
+                    hf_payload = {
+                        "inputs": enhanced_prompt,
+                        "parameters": {
+                            "width": width,
+                            "height": height,
+                            "num_inference_steps": 25
+                        }
+                    }
+                    
+                    async with session.post(
+                        "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0",
+                        headers={"Authorization": f"Bearer {HUGGINGFACE_TOKEN}"},
+                        json=hf_payload,
+                        timeout=60
+                    ) as response:
+                        if response.status == 200:
+                            image_bytes = await response.read()
+                            # Сохраняем изображение и получаем URL (или используем base64)
+                            # Для простоты возвращаем временный URL
+                            print("✅ Hugging Face: Успех")
+                            return {
+                                "success": True,
+                                "url": "image/png;base64," + base64.b64encode(image_bytes).decode(),
+                                "prompt": enhanced_prompt,
+                                "seed": seed,
+                                "api": "Hugging Face"
+                            }
+                        else:
+                            print(f"⚠️ Hugging Face: Статус {response.status}")
+                except Exception as e:
+                    print(f"⚠️ Hugging Face: {e}")
+            
+            # ✅ API #3: Резервный вариант - простой генератор
+            print("🔄 Используем резервный вариант...")
+            # Возвращаем заглушку с информацией что API недоступны
             return {
                 "success": False,
-                "error": "API недоступен. Попробуйте позже или используйте другой промпт."
+                "error": "Сервисы генерации временно недоступны. Попробуйте через 5-10 минут.",
+                "api": "None"
             }
                     
     except Exception as e:
         return {
             "success": False,
-            "error": f"Критическая ошибка: {str(e)}"
+            "error": f"Критическая ошибка: {str(e)}",
+            "api": "None"
         }
 
 def check_generation_limit(user_id: int):
@@ -270,12 +308,12 @@ class AIGenerationView(View):
         if result["success"]:
             embed = discord.Embed(
                 title="🎨 ИИ-Генерация (Обновлено)",
-                description=f"📝 **Промпт:** {self.prompt[:500]}\n🎲 **Seed:** `{new_seed}`",
+                description=f"📝 **Промпт:** {self.prompt[:500]}\n🎲 **Seed:** `{new_seed}`\n🔧 **API:** {result.get('api', 'Unknown')}",
                 color=0x9D00FF,
                 timestamp=datetime.now(timezone.utc)
             )
             embed.set_image(url=result["url"])
-            embed.set_footer(text="🤖 AI Кардинал | GTA 5 NeuroAI | Pollinations.ai")
+            embed.set_footer(text="🤖 AI Кардинал | GTA 5 NeuroAI")
             
             await interaction.followup.send(embed=embed, view=AIGenerationView(interaction.user.id, self.prompt, new_seed))
         else:
@@ -309,7 +347,7 @@ async def ai_generate(ctx, *, prompt: str):
     
     loading_embed = discord.Embed(
         title="🎨 ИИ-Генерация...",
-        description=f"📝 **Промпт:** {prompt[:500]}\n\n⏳ Пожалуйста, подождите (10-30 сек)...",
+        description=f"📝 **Промпт:** {prompt[:500]}\n\n⏳ Пожалуйста, подождите (10-60 сек)...",
         color=0x9D00FF,
         timestamp=datetime.now(timezone.utc)
     )
@@ -318,33 +356,33 @@ async def ai_generate(ctx, *, prompt: str):
     loading_msg = await ctx.send(embed=loading_embed)
     await delete_command_message(ctx)
     
-    # ✅ ДО 3 ПОПЫТОК ГЕНЕРАЦИИ
+    # ✅ ДО 5 ПОПЫТОК ГЕНЕРАЦИИ
     seed = random.randint(1, 999999)
     result = None
-    for attempt in range(3):
+    for attempt in range(5):
         result = await generate_gta_image(prompt, seed + attempt)
         if result["success"]:
             break
-        if attempt < 2:
+        if attempt < 4:
             await loading_msg.edit(
                 embed=discord.Embed(
                     title="🎨 ИИ-Генерация...",
-                    description=f"📝 **Промпт:** {prompt[:500]}\n\n⏳ Попытка {attempt+2}/3...",
+                    description=f"📝 **Промпт:** {prompt[:500]}\n\n⏳ Попытка {attempt+2}/5...\n🔧 Пробуем другой API...",
                     color=0x9D00FF,
                     timestamp=datetime.now(timezone.utc)
                 )
             )
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
     
     if result["success"]:
         embed = discord.Embed(
             title="🎨 ИИ-Генерация завершена",
-            description=f"📝 **Промпт:** {prompt[:500]}\n🎲 **Seed:** `{seed}`",
+            description=f"📝 **Промпт:** {prompt[:500]}\n🎲 **Seed:** `{seed}`\n🔧 **API:** {result.get('api', 'Unknown')}",
             color=0x2ECC71,
             timestamp=datetime.now(timezone.utc)
         )
         embed.set_image(url=result["url"])
-        embed.set_footer(text="🤖 AI Кардинал | GTA 5 NeuroAI | Pollinations.ai")
+        embed.set_footer(text="🤖 AI Кардинал | GTA 5 NeuroAI")
         
         view = AIGenerationView(ctx.author.id, prompt, seed)
         await loading_msg.edit(embed=embed, view=view)
@@ -356,7 +394,8 @@ async def ai_generate(ctx, *, prompt: str):
             [
                 {"name": "👤 Пользователь", "value": f"`{ctx.author.name}`", "inline": True},
                 {"name": "📝 Промпт", "value": f"`{prompt[:50]}`", "inline": True},
-                {"name": "📊 Лимит", "value": f"`{ai_generation_count[ctx.author.id]}/{AI_GENERATION_CONFIG['max_prompts_per_day']}`", "inline": True}
+                {"name": "🔧 API", "value": f"`{result.get('api', 'Unknown')}`", "inline": True},
+                {"name": "📊 Лимит", "value": f"`{ai_generation_count[ctx.author.id]}/{AI_GENERATION_CONFIG['max_prompts_per_day']}`", "inline": False}
             ]
         )
     else:
@@ -366,9 +405,10 @@ async def ai_generate(ctx, *, prompt: str):
                 f"Произошла ошибка при создании изображения.\n\n"
                 f"**Ошибка:** {result['error']}\n\n"
                 f"💡 **Советы:**\n"
-                f"• Попробуйте более короткий промпт\n"
+                f"• Попробуйте более короткий промпт на английском\n"
                 f"• Избегайте специальных символов\n"
-                f"• Подождите несколько минут и попробуйте снова"
+                f"• Подождите 5-10 минут и попробуйте снова\n"
+                f"• Промпт: `Red sports car in city`"
             ),
             color=0xFF6B6B,
             timestamp=datetime.now(timezone.utc)
@@ -397,25 +437,25 @@ async def slash_ai_generate(interaction: discord.Interaction, prompt: str):
     
     await interaction.response.defer()
     
-    # ✅ ДО 3 ПОПЫТОК ГЕНЕРАЦИИ
+    # ✅ ДО 5 ПОПЫТОК ГЕНЕРАЦИИ
     seed = random.randint(1, 999999)
     result = None
-    for attempt in range(3):
+    for attempt in range(5):
         result = await generate_gta_image(prompt, seed + attempt)
         if result["success"]:
             break
-        if attempt < 2:
-            await asyncio.sleep(2)
+        if attempt < 4:
+            await asyncio.sleep(3)
     
     if result["success"]:
         embed = discord.Embed(
             title="🎨 ИИ-Генерация завершена",
-            description=f"📝 **Промпт:** {prompt[:500]}\n🎲 **Seed:** `{seed}`",
+            description=f"📝 **Промпт:** {prompt[:500]}\n🎲 **Seed:** `{seed}`\n🔧 **API:** {result.get('api', 'Unknown')}",
             color=0x2ECC71,
             timestamp=datetime.now(timezone.utc)
         )
         embed.set_image(url=result["url"])
-        embed.set_footer(text="🤖 AI Кардинал | GTA 5 NeuroAI | Pollinations.ai")
+        embed.set_footer(text="🤖 AI Кардинал | GTA 5 NeuroAI")
         
         view = AIGenerationView(interaction.user.id, prompt, seed)
         await interaction.followup.send(embed=embed, view=view)
@@ -427,7 +467,7 @@ async def slash_ai_generate(interaction: discord.Interaction, prompt: str):
             [
                 {"name": "👤 Пользователь", "value": f"`{interaction.user.name}`", "inline": True},
                 {"name": "📝 Промпт", "value": f"`{prompt[:50]}`", "inline": True},
-                {"name": "📊 Лимит", "value": f"`{ai_generation_count[interaction.user.id]}/{AI_GENERATION_CONFIG['max_prompts_per_day']}`", "inline": True}
+                {"name": "🔧 API", "value": f"`{result.get('api', 'Unknown')}`", "inline": True}
             ]
         )
     else:
@@ -759,7 +799,7 @@ async def tickets(ctx):
         timestamp=datetime.now(timezone.utc)
     )
     embed.set_image(url="https://i.imgur.com/yplKlVx.jpeg")
-    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v7.2")
+    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v7.3")
     
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
@@ -1181,7 +1221,7 @@ async def on_ready():
     print(f"🤖 AI кардинал подключен...")
     print(f"📡 {bot.user.name} | 🆔 {bot.user.id}")
     print(f"🎫 Система тикетов: активна")
-    print(f"🎨 ИИ-Генерация: активна (Pollinations.ai)")
+    print(f"🎨 ИИ-Генерация: активна (Pollinations + Hugging Face)")
     print(f"🛡️ Авто-модерация: активна")
     print(f"🔇 Роль мута: {MUTE_ROLE_ID}")
     print(f"👋 Канал приветствий: {WELCOME_CHANNEL_ID}")
