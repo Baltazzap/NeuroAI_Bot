@@ -167,7 +167,7 @@ async def _delete_interaction_message(interaction: discord.Interaction):
 # ============================================
 
 async def generate_gta_image(prompt: str, seed: int = None):
-    """Генерация изображения через Pollinations.ai API (БЕСПЛАТНО)"""
+    """Генерация изображения через Pollinations.ai API с обработкой ошибок"""
     try:
         enhanced_prompt = f"{prompt}, {AI_GENERATION_CONFIG['gta_style_prompt']}"
         
@@ -178,27 +178,49 @@ async def generate_gta_image(prompt: str, seed: int = None):
         height = AI_GENERATION_CONFIG["height"]
         encoded_prompt = urllib.parse.quote(enhanced_prompt)
         
-        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}&model=flux&nologo=true"
+        # ✅ НЕСКОЛЬКО ВАРИАНТОВ URL ДЛЯ НАДЁЖНОСТИ
+        urls = [
+            f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}&model=flux&nologo=true",
+            f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}&model=flux",
+            f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}",
+        ]
         
+        # ✅ ПРОБУЕМ НЕСКОЛЬКО РАЗ С РАЗНЫМИ URL
         async with aiohttp.ClientSession() as session:
-            async with session.get(image_url, timeout=30) as response:
-                if response.status == 200:
-                    return {
-                        "success": True,
-                        "url": image_url,
-                        "prompt": enhanced_prompt,
-                        "seed": seed
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "error": f"API вернул статус {response.status}"
-                    }
+            for i, image_url in enumerate(urls):
+                try:
+                    async with session.get(image_url, timeout=30) as response:
+                        if response.status == 200:
+                            content_type = response.headers.get('Content-Type', '')
+                            if 'image' in content_type:
+                                return {
+                                    "success": True,
+                                    "url": image_url,
+                                    "prompt": enhanced_prompt,
+                                    "seed": seed
+                                }
+                        elif response.status == 500:
+                            print(f"⚠️ Попытка {i+1}: API вернул 500, пробуем следующий URL...")
+                            continue
+                        else:
+                            print(f"⚠️ Попытка {i+1}: API вернул статус {response.status}")
+                            continue
+                except asyncio.TimeoutError:
+                    print(f"⚠️ Попытка {i+1}: Таймаут, пробуем следующий URL...")
+                    continue
+                except Exception as e:
+                    print(f"⚠️ Попытка {i+1}: Ошибка {e}, пробуем следующий URL...")
+                    continue
+            
+            return {
+                "success": False,
+                "error": "API недоступен. Попробуйте позже или используйте другой промпт."
+            }
                     
     except Exception as e:
         return {
             "success": False,
-            "error": str(e)
+            "error": f"Критическая ошибка: {str(e)}"
         }
 
 def check_generation_limit(user_id: int):
@@ -221,7 +243,7 @@ def check_generation_limit(user_id: int):
 
 class AIGenerationView(View):
     def __init__(self, user_id: int, prompt: str, seed: int = None):
-        super().__init__(timeout=300)  # 5 минут таймаут
+        super().__init__(timeout=300)
         self.user_id = user_id
         self.prompt = prompt
         self.seed = seed if seed else random.randint(1, 999999)
@@ -296,8 +318,23 @@ async def ai_generate(ctx, *, prompt: str):
     loading_msg = await ctx.send(embed=loading_embed)
     await delete_command_message(ctx)
     
+    # ✅ ДО 3 ПОПЫТОК ГЕНЕРАЦИИ
     seed = random.randint(1, 999999)
-    result = await generate_gta_image(prompt, seed)
+    result = None
+    for attempt in range(3):
+        result = await generate_gta_image(prompt, seed + attempt)
+        if result["success"]:
+            break
+        if attempt < 2:
+            await loading_msg.edit(
+                embed=discord.Embed(
+                    title="🎨 ИИ-Генерация...",
+                    description=f"📝 **Промпт:** {prompt[:500]}\n\n⏳ Попытка {attempt+2}/3...",
+                    color=0x9D00FF,
+                    timestamp=datetime.now(timezone.utc)
+                )
+            )
+            await asyncio.sleep(2)
     
     if result["success"]:
         embed = discord.Embed(
@@ -325,7 +362,14 @@ async def ai_generate(ctx, *, prompt: str):
     else:
         error_embed = discord.Embed(
             title="❌ Ошибка генерации",
-            description=f"Произошла ошибка при создании изображения.\n\n**Ошибка:** {result['error']}",
+            description=(
+                f"Произошла ошибка при создании изображения.\n\n"
+                f"**Ошибка:** {result['error']}\n\n"
+                f"💡 **Советы:**\n"
+                f"• Попробуйте более короткий промпт\n"
+                f"• Избегайте специальных символов\n"
+                f"• Подождите несколько минут и попробуйте снова"
+            ),
             color=0xFF6B6B,
             timestamp=datetime.now(timezone.utc)
         )
@@ -353,8 +397,15 @@ async def slash_ai_generate(interaction: discord.Interaction, prompt: str):
     
     await interaction.response.defer()
     
+    # ✅ ДО 3 ПОПЫТОК ГЕНЕРАЦИИ
     seed = random.randint(1, 999999)
-    result = await generate_gta_image(prompt, seed)
+    result = None
+    for attempt in range(3):
+        result = await generate_gta_image(prompt, seed + attempt)
+        if result["success"]:
+            break
+        if attempt < 2:
+            await asyncio.sleep(2)
     
     if result["success"]:
         embed = discord.Embed(
@@ -708,7 +759,7 @@ async def tickets(ctx):
         timestamp=datetime.now(timezone.utc)
     )
     embed.set_image(url="https://i.imgur.com/yplKlVx.jpeg")
-    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v7.1")
+    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v7.2")
     
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
@@ -964,9 +1015,7 @@ async def on_member_remove(member):
 
 @bot.event
 async def on_ready():
-    # ✅ РЕГИСТРАЦИЯ ТОЛЬКО PERSISTENT VIEWS (без timeout)
     bot.add_view(TicketPanelView())
-    # ❌ AIGenerationView НЕ регистрируем - у него есть timeout=300
     
     @tree.command(name="mute", description="Заглушить пользователя на указанное время")
     @describe(member="Пользователь для мута", duration="Длительность в минутах", reason="Причина мута")
