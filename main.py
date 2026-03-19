@@ -190,15 +190,15 @@ class TicketView(View):
             is_owner = user.id == self.ticket_owner_id
             
             if not is_admin and not is_owner:
-                await interaction.response.send_message("Нет прав для закрытия.", ephemeral=True)
+                await interaction.response.send_message("⚠️ Нет прав для закрытия.", ephemeral=True)
                 return
             
             confirm_view = ConfirmCloseView(channel.id, user.id)
-            await interaction.response.send_message("Закрыть тикет?", view=confirm_view, ephemeral=True)
+            await interaction.response.send_message("⚠️ Закрыть тикет?", view=confirm_view, ephemeral=True)
         except Exception as e:
             print(f"❌ Ошибка кнопки закрытия: {e}")
             if not interaction.response.is_done():
-                await interaction.response.send_message("Произошла ошибка. Попробуйте позже.", ephemeral=True)
+                await interaction.response.send_message("❌ Произошла ошибка. Попробуйте позже.", ephemeral=True)
     
     @button(style=discord.ButtonStyle.primary, label="Взять в работу", emoji="👨‍💼", custom_id="claim_ticket_btn")
     async def claim_button(self, interaction: discord.Interaction, button: Button):
@@ -207,7 +207,7 @@ class TicketView(View):
             channel = interaction.channel
             
             if not can_manage_tickets(user):
-                await interaction.response.send_message("Только администрация и поддержка могут брать тикеты в работу.", ephemeral=True)
+                await interaction.response.send_message("⚠️ Только администрация и поддержка могут брать тикеты в работу.", ephemeral=True)
                 return
             
             try:
@@ -224,14 +224,14 @@ class TicketView(View):
                             color=0x2ECC71,
                             timestamp=datetime.now(timezone.utc)
                         )
-                        new_embed.set_footer(text="AI кардинал | Система поддержки")
+                        new_embed.set_footer(text="🤖 AI кардинал | Система поддержки")
                         await message.edit(embed=new_embed)
                         break
             except Exception as e:
-                print(f"Не удалось обновить эмбед: {e}")
+                print(f"⚠️ Не удалось обновить эмбед: {e}")
             
             embed = discord.Embed(
-                title="Тикет взят в работу",
+                title="👨‍💼 Тикет взят в работу",
                 description=f"{user.mention} начал обработку вашего обращения.\nОжидайте ответа в этом канале.",
                 color=0x2ECC71,
                 timestamp=datetime.now(timezone.utc)
@@ -242,12 +242,12 @@ class TicketView(View):
             await interaction.response.defer()
             
             await send_log(
-                bot, "Тикет взят в работу",
+                bot, "👨‍💼 Тикет взят в работу",
                 f"{user.mention} взял в работу {channel.mention}",
                 0x2ECC71,
                 [
-                    {"name": "Сотрудник", "value": f"`{user.name}`", "inline": True},
-                    {"name": "Канал", "value": f"`{channel.name}`", "inline": True}
+                    {"name": "👤 Сотрудник", "value": f"`{user.name}`", "inline": True},
+                    {"name": "📋 Канал", "value": f"`{channel.name}`", "inline": True}
                 ]
             )
         except Exception as e:
@@ -260,14 +260,12 @@ class TicketCategorySelect(Select):
         options = [
             discord.SelectOption(
                 label=config["label"],
-                value=key,
-                emoji=config["emoji"],
-                description=config["description"][:100] + "..." if len(config["description"]) > 100 else config["description"]
+                value=key
             )
             for key, config in TICKET_TYPES.items()
         ]
         super().__init__(
-            placeholder="Выберите категорию обращения...",
+            placeholder="📋 Выберите категорию обращения...",
             min_values=1,
             max_values=1,
             options=options,
@@ -329,12 +327,11 @@ class TicketCategorySelect(Select):
             )
             
             embed = discord.Embed(
-                title=f"{config['emoji']} {config['label']}",
+                title=f"🎫 {config['label']}",
                 description=(
                     f"{user.mention}, ваш тикет успешно создан!\n\n"
                     f"📋 Детали обращения:\n"
                     f"• Категория: `{config['label']}`\n"
-                    f"• Описание: {config['description']}\n"
                     f"• Создан: <t:{int(datetime.now(timezone.utc).timestamp())}:R>\n"
                     f"• Статус: `🟡 Ожидает ответа`\n\n"
                     f"💬 Что дальше?\n"
@@ -416,22 +413,26 @@ async def tickets(ctx):
     await delete_command_message(ctx)
     
     categories_text = "\n\n".join([
-        f"**{config['emoji']} {config['label']}**\n{config['description']}"
+        f"**🎫 {config['label']}**"
         for config in TICKET_TYPES.values()
     ])
     
     embed = discord.Embed(
-        title="Система поддержки Neuro_AI",
+        title="🎫 Система поддержки Neuro_AI",
         description=(
             f"Добро пожаловать в центр поддержки **GTA 5 NeuroAI RolePlay**.\n\n"
             f"Нажмите на кнопку ниже, чтобы создать обращение. Выберите категорию, и система автоматически создаст приватный канал для связи с администрацией.\n\n"
-            f"Доступные категории:\n{categories_text}\n\n"
+            f"📋 Доступные категории:\n{categories_text}\n\n"
+            f"⚡ Преимущества:\n"
+            f"• 🔒 Конфиденциальность — тикет видят только вы и администрация\n"
+            f"• 📊 Быстрый ответ — среднее время: 15 минут\n"
+            f"• 🤖 Прозрачность — статус отслеживается в реальном времени"
         ),
         color=0x9D00FF,
         timestamp=datetime.now(timezone.utc)
     )
     embed.set_image(url="https://i.imgur.com/yplKlVx.jpeg")
-    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v8.0")
+    embed.set_footer(text="🤖 AI кардинал | NeuroAI support v8.1")
     
     view = TicketPanelView()
     await ctx.send(embed=embed, view=view)
@@ -555,7 +556,7 @@ async def mute_user(member, reason, channel=None):
         )
         
         try:
-            await member.send(f"⚠️ Вы были заглушены автоматически.\n**Причина:** {reason}\n\nОбратитесь в тикет для разблокировки.")
+            await member.send(f"⚠️ Вы были заглушены автоматически.\n\n**Причина:** {reason}\n\nОбратитесь в тикет для разблокировки.")
         except:
             pass
     except Exception as e:
@@ -628,7 +629,7 @@ async def on_member_join(member):
             embed = discord.Embed(
                 title="📡 Обнаружено новое подключение",
                 description=(
-                    f"Добро пожаловать в **GTA 5 NeuroAI RolePlay**.\n"
+                    f"Добро пожаловать в **GTA 5 NeuroAI RolePlay**.\n\n"
                     f"**Пользователь:** {member.mention}\n"
                     f"**ID системы:** `{member.id}`\n"
                     f"**Статус:** Синхронизация завершена\n"
@@ -637,11 +638,11 @@ async def on_member_join(member):
                 timestamp=datetime.now(timezone.utc)
             )
             embed.add_field(
-                name="",
-                value=f"Внимательно изучите правила в канале <#{RULES_CHANNEL_ID}>\n\n **Внимание:** нарушение протоколов приведет к блокировке доступа.",
+                name="📜 Ознакомление с протоколами",
+                value=f"Внимательно изучите правила в канале <#{RULES_CHANNEL_ID}>\n\n⚠️ **Внимание:** нарушение протоколов приведет к блокировке доступа.",
                 inline=False
             )
-            embed.set_footer(text="🤖 AI кардинал | NeuroAI system v1.0")
+            embed.set_footer(text="AI кардинал | NeuroAI system v1.0")
             embed.set_thumbnail(url=member.avatar.url if member.avatar else member.default_avatar.url)
             await channel.send(embed=embed)
             print(f"✅ Приветствие отправлено: {member.name}")
