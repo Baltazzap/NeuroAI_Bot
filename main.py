@@ -68,32 +68,22 @@ ticket_owners = {}
 TICKET_TYPES = {
     "help_player": {
         "label": "Помощь игроку",
-        "description": "Вопросы по геймплею, баги, проблемы с доступом, управление персонажем",
-        "emoji": "🎫",
         "color": 0x00BFFF
     },
     "report_player": {
         "label": "Жалоба на игрока",
-        "description": "Нарушения правил, токсичность, гриферство, неправомерные действия администрации",
-        "emoji": "⚠️",
         "color": 0xFF6B6B
     },
     "suggestion": {
         "label": "Предложение",
-        "description": "Идеи по улучшению сервера, новые механики, баланс, контент",
-        "emoji": "💡",
         "color": 0xFFD700
     },
     "tech_support": {
         "label": "Техническая поддержка",
-        "description": "Проблемы с лаунчером, подключением, донатом, установкой модов",
-        "emoji": "🔧",
         "color": 0x9D00FF
     },
     "rp_event": {
         "label": "Сюжет и ивент",
-        "description": "Предложения по ролевым событиям, историям, сотрудничество с фракциями",
-        "emoji": "🎭",
         "color": 0xE91E63
     }
 }
@@ -200,15 +190,15 @@ class TicketView(View):
             is_owner = user.id == self.ticket_owner_id
             
             if not is_admin and not is_owner:
-                await interaction.response.send_message("⚠️ Нет прав для закрытия.", ephemeral=True)
+                await interaction.response.send_message("Нет прав для закрытия.", ephemeral=True)
                 return
             
             confirm_view = ConfirmCloseView(channel.id, user.id)
-            await interaction.response.send_message("⚠️ Закрыть тикет?", view=confirm_view, ephemeral=True)
+            await interaction.response.send_message("Закрыть тикет?", view=confirm_view, ephemeral=True)
         except Exception as e:
             print(f"❌ Ошибка кнопки закрытия: {e}")
             if not interaction.response.is_done():
-                await interaction.response.send_message("❌ Произошла ошибка. Попробуйте позже.", ephemeral=True)
+                await interaction.response.send_message("Произошла ошибка. Попробуйте позже.", ephemeral=True)
     
     @button(style=discord.ButtonStyle.primary, label="Взять в работу", emoji="👨‍💼", custom_id="claim_ticket_btn")
     async def claim_button(self, interaction: discord.Interaction, button: Button):
@@ -217,7 +207,7 @@ class TicketView(View):
             channel = interaction.channel
             
             if not can_manage_tickets(user):
-                await interaction.response.send_message("⚠️ Только администрация и поддержка могут брать тикеты в работу.", ephemeral=True)
+                await interaction.response.send_message("Только администрация и поддержка могут брать тикеты в работу.", ephemeral=True)
                 return
             
             try:
@@ -234,14 +224,14 @@ class TicketView(View):
                             color=0x2ECC71,
                             timestamp=datetime.now(timezone.utc)
                         )
-                        new_embed.set_footer(text="🤖 AI кардинал | Система поддержки")
+                        new_embed.set_footer(text="AI кардинал | Система поддержки")
                         await message.edit(embed=new_embed)
                         break
             except Exception as e:
-                print(f"⚠️ Не удалось обновить эмбед: {e}")
+                print(f"Не удалось обновить эмбед: {e}")
             
             embed = discord.Embed(
-                title="👨‍💼 Тикет взят в работу",
+                title="Тикет взят в работу",
                 description=f"{user.mention} начал обработку вашего обращения.\nОжидайте ответа в этом канале.",
                 color=0x2ECC71,
                 timestamp=datetime.now(timezone.utc)
@@ -252,12 +242,12 @@ class TicketView(View):
             await interaction.response.defer()
             
             await send_log(
-                bot, "👨‍💼 Тикет взят в работу",
+                bot, "Тикет взят в работу",
                 f"{user.mention} взял в работу {channel.mention}",
                 0x2ECC71,
                 [
-                    {"name": "👤 Сотрудник", "value": f"`{user.name}`", "inline": True},
-                    {"name": "📋 Канал", "value": f"`{channel.name}`", "inline": True}
+                    {"name": "Сотрудник", "value": f"`{user.name}`", "inline": True},
+                    {"name": "Канал", "value": f"`{channel.name}`", "inline": True}
                 ]
             )
         except Exception as e:
@@ -277,7 +267,7 @@ class TicketCategorySelect(Select):
             for key, config in TICKET_TYPES.items()
         ]
         super().__init__(
-            placeholder="📋 Выберите категорию обращения...",
+            placeholder="Выберите категорию обращения...",
             min_values=1,
             max_values=1,
             options=options,
